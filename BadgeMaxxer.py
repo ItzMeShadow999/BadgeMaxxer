@@ -1,6 +1,4 @@
 #!/usr/bin/env python3
-"""BadgeMaxxer: Discord badge leveling (Go Live stream time, game time, game variety).
-Reads and writes session.json (token, cookie, fingerprint, totals)."""
 from __future__ import annotations
 
 import atexit
@@ -23,8 +21,10 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
+import webbrowser
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Sequence
@@ -306,7 +306,6 @@ def gold_fg(rgb: tuple[int, int, int]) -> str:
 
 
 def gold_text(text: str) -> str:
-    """Horizontal gold gradient over a plain string."""
     span = max(1, len(text) - 1)
     out: list[str] = []
     last = -1
@@ -324,7 +323,6 @@ def gold_text(text: str) -> str:
 
 
 class Banner:
-    """Gold banner pinned to the top of the terminal (scroll region), redrawn on every screen."""
 
     SUBTITLE = "Discord badge leveling  ·  Game Time  ·  Game Variety  ·  Streaming"
     MIN_ROWS_FULL = 28
@@ -405,8 +403,6 @@ atexit.register(BANNER.release)
 
 
 def zoom_out_terminal() -> None:
-    """Windows only. Windows Terminal: sends Ctrl+minus to the focused window (shrinks font).
-    Classic console: resizes the window instead (it has no font hotkey)."""
     if os.name != "nt" or not sys.stdout.isatty():
         return
     try:
@@ -465,7 +461,6 @@ def read_key() -> str:
 
 
 def arrow_menu(title: str, options: Sequence[str], hint: str = "↑/↓ move · enter select", start: int = 0) -> int | None:
-    """Arrow-key menu. Returns the chosen index, or None on esc/q."""
     n = len(options)
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print(f"  {title}")
@@ -516,7 +511,6 @@ def arrow_menu(title: str, options: Sequence[str], hint: str = "↑/↓ move · 
 
 
 class LineLoader:
-    """One in-place line: spinner + 'Fetching <name>.... n% done' (same style as the CustomBadges installer)."""
 
     def __init__(self) -> None:
         self.enabled = sys.stdout.isatty()
@@ -622,7 +616,6 @@ _HELP_TOKENS = re.compile(
 
 
 def print_cookie_help(T: "TerminalInterface", lines: "tuple[str, ...] | None" = None) -> None:
-    """COOKIE_HELP with colors: gold title and steps, cyan URLs, green keywords, yellow notes."""
     R, TXT, GOLD_C = T.COLOR_RESET, T.COLOR_TEXT, T.COLOR_PRIMARY
     CYAN, GREEN, YEL = "\x1b[96m", T.COLOR_SUCCESS, T.COLOR_NOTICE
 
@@ -648,14 +641,12 @@ _COOKIE_IN_PASTE = re.compile(
 
 
 def extract_cookie_header(raw: str) -> str:
-    """Accepts a bare cookie, a 'Cookie: ...' header line, or a pasted 'Copy as cURL' request."""
     raw = raw.strip()
     m = _COOKIE_IN_PASTE.search(raw)
     return (m.group(1) if m else raw).strip()
 
 
 def fetch_base_cookies(url: str = "https://discord.com/app") -> str:
-    """Plain GET like any client; returns the cookies discord.com sets (no cf_clearance, that needs a browser challenge)."""
     req = urllib.request.Request(url, headers={"user-agent": USER_AGENT_IDENTIFIER})
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
@@ -683,6 +674,7 @@ class AccountSessionState:
     last_guild_id: str = ""
     last_channel_id: str = ""
     github_user: str = ""
+    github_token: str = ""
 
     @classmethod
     def restore(cls) -> "AccountSessionState":
@@ -1151,7 +1143,6 @@ class Console:
 
 
 class MiniWebSocket:
-    """Pure stdlib websocket client (RFC 6455) for discord gateway communication."""
 
     def __init__(self, host: str, port: int = 443, path: str = "/") -> None:
         host_clean = host.replace("wss://", "").replace("https://", "").rstrip("/")
@@ -1315,11 +1306,6 @@ class MiniWebSocket:
 
 
 class VoiceConnection:
-    """
-    Manages a single voice WebSocket + UDP socket pair
-    Handles: identify → ready → IP discovery → select protocol →
-    session description → heartbeats → silent audio pump
-    """
 
     def __init__(
         self,
@@ -1369,7 +1355,6 @@ class VoiceConnection:
         self._audio_thread: threading.Thread | None = None
 
     def connect(self) -> bool:
-        """Full voice handshake: WS → identify → ready → UDP → select protocol → session description."""
         C = self.console
 
         try:
@@ -1452,7 +1437,6 @@ class VoiceConnection:
         return True
 
     def _recv_op(self, target_op: int, timeout: float = 10) -> dict | None:
-        """Receive messages until we get the target opcode or timeout."""
         deadline = time.time() + timeout
         while time.time() < deadline:
             remaining = max(0.1, deadline - time.time())
@@ -1474,7 +1458,6 @@ class VoiceConnection:
         return None
 
     def _send_heartbeat(self) -> None:
-        """Send voice heartbeat (op 3)."""
         if self.ws and not self.ws.closed:
             try:
                 nonce = int(time.time() * 1000)
@@ -1483,7 +1466,6 @@ class VoiceConnection:
                 pass
 
     def _udp_discovery(self) -> bool:
-        """Perform UDP IP discovery to find external IP and port."""
         try:
             self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.udp_sock.settimeout(5)
@@ -1513,7 +1495,6 @@ class VoiceConnection:
             return False
 
     def start_heartbeat(self) -> None:
-        """Start voice heartbeat loop in background thread."""
         def _loop():
             while self.running and self.ws and not self.ws.closed:
                 self._send_heartbeat()
@@ -1529,7 +1510,6 @@ class VoiceConnection:
         self._hb_thread.start()
 
     def send_speaking(self, speaking: bool = True) -> None:
-        """Send speaking state (op 5)."""
         if self.ws and not self.ws.closed:
             try:
                 self.ws.send(json.dumps({
@@ -1544,7 +1524,6 @@ class VoiceConnection:
                 pass
 
     def start_silence_pump(self) -> None:
-        """Pump silent Opus frames via UDP to keep the voice/stream session alive."""
         if not self.udp_sock or not self.secret_key:
             return
 
@@ -1571,7 +1550,6 @@ class VoiceConnection:
         self._audio_thread.start()
 
     def _send_encrypted_silence_gcm(self, seq: int, ts: int) -> None:
-        """Send AES-256-GCM encrypted silence packet."""
         if not self.udp_sock or not self.secret_key:
             return
         try:
@@ -1618,7 +1596,6 @@ _AFK_RE = re.compile(r"(?<![a-z])afk(?![a-z])", re.I)
 
 
 def is_afk_channel(channel_id: str, name: str, afk_id: str = "") -> bool:
-    """True for the server's configured AFK channel or any voice channel with 'afk' in its name."""
     return (bool(afk_id) and str(channel_id) == str(afk_id)) or bool(_AFK_RE.search(str(name or "")))
 
 
@@ -1678,7 +1655,6 @@ def fetch_member_roles(token: str, super_props: str, guild_id: str, me_id: str) 
 
 
 def _discord_api_get(url: str, token: str, super_props: str = "") -> tuple[int, dict]:
-    """Helper to perform GET request to Discord REST API."""
     headers = {
         "authorization": token,
         "user-agent": USER_AGENT,
@@ -1707,14 +1683,6 @@ def validate_stream_target(
     channel_id: str,
     console: Console,
 ) -> tuple[bool, str]:
-    """
-    Validates:
-    1. Snowflake ID formats (must be numeric 17-20 digits)
-    2. Token authentication (GET /users/@me)
-    3. Server existence & user membership (GET /guilds/{guild_id})
-    4. Voice channel existence, guild matching, and type (GET /channels/{channel_id})
-    5. User permissions in the voice channel: View Channel, Connect, and Stream (Go Live)
-    """
     C = console
 
     if not guild_id.isdigit():
@@ -1822,8 +1790,6 @@ def validate_stream_target(
 
 
 def _summarize_guild(g: dict, me_id: str = "") -> dict:
-    """Name, member count and the busiest non-AFK voice channels of one guild payload (READY or GUILD_CREATE shape),
-    each with a stream verdict (True / False / None when roles or overwrites were not in the payload)."""
     props = g.get("properties") or {}
     gid = str(g.get("id"))
     afk_id = str(g.get("afk_channel_id") or props.get("afk_channel_id") or "")
@@ -1867,9 +1833,6 @@ def _summarize_guild(g: dict, me_id: str = "") -> dict:
 
 def scan_busy_servers(token: str, props: dict, super_props: str, timeout: float = 15.0, limit: int = 3,
                       debug: dict | None = None, all_out: list | None = None) -> list[dict]:
-    """Reads the account's own guild data from the gateway (like the Discord client does) and returns the
-    servers with the most crowded voice channels. Channels come from READY / GUILD_CREATE, voice states from
-    READY_SUPPLEMENTAL / GUILD_CREATE. Returns [] if anything fails; `debug` is filled with what was seen."""
     dbg = debug if debug is not None else {}
     dbg.update(events={}, close=None, error="", guilds=0, with_channels=0, with_voice=0)
     ws = MiniWebSocket(GATEWAY_URL, path="/?v=9&encoding=json")
@@ -1962,8 +1925,6 @@ def scan_busy_servers(token: str, props: dict, super_props: str, timeout: float 
 
 
 def rest_guild_vcs(token: str, super_props: str, g: dict, me_id: str, limit: int | None = None) -> list[tuple] | None:
-    """Non-AFK voice channels of one /users/@me/guilds entry as (id, name, None, can_stream), streamable first.
-    None when the channel list could not be read."""
     gid = str(g["id"])
     cst, chans = _discord_api_get(f"https://discord.com/api/v9/guilds/{gid}/channels", token, super_props)
     if cst != 200 or not isinstance(chans, list):
@@ -1996,8 +1957,6 @@ def rest_guild_vcs(token: str, super_props: str, g: dict, me_id: str, limit: int
 
 
 def rest_active_servers(token: str, super_props: str, limit: int = 3) -> list[dict]:
-    """Token-only fallback: your servers ranked by online members, each with its non-AFK voice channels and a
-    stream verdict. Live voice occupancy is not available over REST, so channel counts are None."""
     st, data = _discord_api_get("https://discord.com/api/v9/users/@me/guilds?with_counts=true", token, super_props)
     if st != 200 or not isinstance(data, list):
         return []
@@ -2026,7 +1985,6 @@ def format_recommendation(r: dict) -> str:
 
 
 def resolve_server(token: str, super_props: str, text: str) -> tuple[str, str]:
-    """(guild_id, error). Accepts an id or an exact server name (case-insensitive)."""
     if text.isdigit():
         return text, ""
     st, data = _discord_api_get("https://discord.com/api/v9/users/@me/guilds", token, super_props)
@@ -2041,7 +1999,6 @@ def resolve_server(token: str, super_props: str, text: str) -> tuple[str, str]:
 
 
 def resolve_voice_channel(token: str, super_props: str, guild_id: str, text: str) -> tuple[str, str]:
-    """(channel_id, error). Accepts an id or an exact voice channel name (case-insensitive)."""
     if text.isdigit():
         return text, ""
     st, data = _discord_api_get(f"https://discord.com/api/v9/guilds/{guild_id}/channels", token, super_props)
@@ -2056,21 +2013,6 @@ def resolve_voice_channel(token: str, super_props: str, guild_id: str, text: str
 
 
 class GatewayStreamEngine:
-    """
-    Connects to Discord gateway, joins a vc, completes the
-    full voice websocket + UDP handshake, then initiates Go Live streaming
-
-    This is the ONLY method that actually works for streaming badge
-    accumulation: Discord tracks streaming time server-side via active
-    voice state + stream state on their SFU media workers
-
-    Architecture:
-        Main Gateway WS (wss://gateway.discord.gg/?v=9)
-            ├── Voice WS (wss://{voice_endpoint}/?v=7)
-            │   └── Voice UDP (ssrc, silence frames)
-            └── Stream WS (wss://{stream_endpoint}/?v=7)
-                └── Stream UDP (ssrc, silence frames)
-    """
 
     def __init__(self, state: AccountSessionState, session: RuntimeClientContext, console: Console) -> None:
         self.state = state
@@ -2167,7 +2109,6 @@ class GatewayStreamEngine:
         self._cleanup(guild_id)
 
     def _status_display(self) -> None:
-        """Periodically display elapsed streaming time."""
         while self.running:
             time.sleep(60)
             if not self.running:
@@ -2187,10 +2128,6 @@ class GatewayStreamEngine:
             )
 
     def _reconnect(self, guild_id: str, channel_id: str, can_resume: bool = True) -> bool:
-        """
-        cleanly reconnects to Discord Gateway and re-establishes voice + Go Live stream
-        maintains continuous stream elapsed time across drops
-        """
         C = self.console
         if not self.running:
             return False
@@ -2345,7 +2282,6 @@ class GatewayStreamEngine:
         return False
 
     def _event_loop(self, guild_id: str, channel_id: str) -> None:
-        """Main gateway event loop — handles all opcodes and dispatched events."""
         last_hb = time.time()
 
         while self.running:
@@ -2467,7 +2403,6 @@ class GatewayStreamEngine:
                 last_hb = time.time()
 
     def _handle_dispatch(self, event_type: str, d: dict, guild_id: str, channel_id: str) -> None:
-        """Handle dispatched gateway events (op 0)."""
         C = self.console
 
         if event_type == "READY":
@@ -2693,7 +2628,6 @@ class GatewayStreamEngine:
                 C.info(f"voice connection status: {status}")
 
     def _cleanup(self, guild_id: str) -> None:
-        """Graceful shutdown: stop stream, leave voice, close connections."""
         C = self.console
         self.running = False
 
@@ -2750,26 +2684,97 @@ class GatewayStreamEngine:
 
 
 
-STAR_REPO = "ItzMeShadow999/badgemaxxer"
+STAR_REPO = "ItzMeShadow999/BadgeMaxxer"
 
 
-def has_starred(username: str) -> bool | None:
-    page = 1
-    while True:
-        req = urllib.request.Request(
-            f"https://api.github.com/repos/{STAR_REPO}/stargazers?per_page=100&page={page}",
-            headers={"user-agent": "BadgeMaxxer", "accept": "application/vnd.github+json"},
-        )
+GITHUB_CLIENT_ID = "Ov23liu4TVIYMEPe5ArO"
+STAR_ERROR = ""
+
+
+def _github_request(url: str, data: dict | None = None, token: str = "",
+                    accept: str = "application/vnd.github+json") -> tuple[int, Any]:
+    global STAR_ERROR
+    headers = {"user-agent": "BadgeMaxxer", "accept": accept}
+    body = None
+    if data is not None:
+        body = urllib.parse.urlencode(data).encode("utf-8")
+        headers["content-type"] = "application/x-www-form-urlencoded"
+    if token:
+        headers["authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, data=body, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            status, raw = resp.status, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as exc:
+        status = exc.code
         try:
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                users = json.loads(resp.read().decode("utf-8"))
+            raw = exc.read().decode("utf-8", "replace")
         except Exception:
-            return None
-        if any(str(u.get("login", "")).lower() == username.lower() for u in users):
-            return True
-        if len(users) < 100:
-            return False
-        page += 1
+            raw = ""
+        STAR_ERROR = f"GitHub rate limit hit (HTTP {status}), try again in a while" if status in (403, 429) else f"HTTP {status}"
+    except Exception as exc:
+        STAR_ERROR = f"{type(exc).__name__}: {exc}"
+        return 0, {}
+    try:
+        return status, json.loads(raw)
+    except ValueError:
+        return status, {}
+
+
+def github_device_login(T: "TerminalInterface") -> str:
+    if GITHUB_CLIENT_ID.startswith("PASTE"):
+        T.failure("github", "GITHUB_CLIENT_ID is not set in BadgeMaxxer.py (create an OAuth App with Device Flow enabled).")
+        return ""
+    st, d = _github_request("https://github.com/login/device/code", data={"client_id": GITHUB_CLIENT_ID}, accept="application/json")
+    if st != 200 or not isinstance(d, dict) or "device_code" not in d:
+        reason = (d.get("error_description") if isinstance(d, dict) else "") or STAR_ERROR or st
+        T.failure("github", f"could not start GitHub login ({reason})")
+        return ""
+    url = d.get("verification_uri", "https://github.com/login/device")
+    T.log(f"Open {T.COLOR_PRIMARY}{url}{T.COLOR_TEXT} and enter the code {T.COLOR_PRIMARY}{d['user_code']}{T.COLOR_TEXT}")
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+    T.log("waiting for you to approve in the browser...")
+    interval = int(d.get("interval", 5))
+    deadline = time.time() + int(d.get("expires_in", 900))
+    while time.time() < deadline:
+        time.sleep(interval)
+        st, r = _github_request(
+            "https://github.com/login/oauth/access_token",
+            data={"client_id": GITHUB_CLIENT_ID, "device_code": d["device_code"],
+                  "grant_type": "urn:ietf:params:oauth:grant-type:device_code"},
+            accept="application/json",
+        )
+        if st == 0:
+            continue
+        if isinstance(r, dict) and r.get("access_token"):
+            return str(r["access_token"])
+        err = r.get("error") if isinstance(r, dict) else None
+        if err == "authorization_pending":
+            continue
+        if err == "slow_down":
+            interval = int(r.get("interval", interval + 5))
+            continue
+        if err == "access_denied":
+            T.failure("github", "login was cancelled")
+            return ""
+        if err == "expired_token":
+            break
+        T.failure("github", f"login failed ({err or st})")
+        return ""
+    T.failure("github", "login timed out, run BadgeMaxxer again")
+    return ""
+
+
+def check_star(token: str) -> tuple[bool | None, int]:
+    st, _ = _github_request(f"https://api.github.com/user/starred/{STAR_REPO}", token=token)
+    if st == 204:
+        return True, st
+    if st == 404:
+        return False, st
+    return None, st
 
 
 class ApplicationController:
@@ -2781,28 +2786,40 @@ class ApplicationController:
         self.fabricator: TelemetryEventFabricator | None = None
         self.catalog: list[DetectableTitle] = []
 
-    def _star_gate(self) -> bool:
+    def _star_gate(self, quiet: bool = False) -> bool:
         T = self.terminal
-        for _ in range(3):
-            user = self.state.github_user
-            if not user:
-                T.log(f"BadgeMaxxer only works if you star https://github.com/{STAR_REPO}")
-                user = input(f"  {T.COLOR_MUTED}your GitHub username:{T.COLOR_RESET} ").strip().lstrip("@")
-            if not user:
-                continue
-            T.log("checking your star...")
-            starred = has_starred(user)
-            if starred:
-                self.state.github_user = user
+        token = self.state.github_token
+        for _ in range(2):
+            if not token:
+                if quiet:
+                    T.failure("star", "GitHub login is no longer valid.")
+                    return False
+                T.log(f"BadgeMaxxer needs you to log in with GitHub and star https://github.com/{STAR_REPO}")
+                token = github_device_login(T)
+                if not token:
+                    return False
+                self.state.github_token = token
                 self.state.persist()
-                T.success("star", f"verified, thanks {user}")
-                return True
-            if starred is None:
-                T.failure("star", "could not reach GitHub to verify your star, try again later.")
-                return False
-            T.failure("star", f"{user} has not starred {STAR_REPO}. Star it, then enter your username again.")
-            self.state.github_user = ""
-        return False
+            elif not quiet:
+                T.log("checking your star...")
+            starred, st = check_star(token)
+            if st != 401:
+                break
+            self.state.github_token = ""
+            self.state.persist()
+            token = ""
+        else:
+            T.failure("star", "GitHub rejected the login, run BadgeMaxxer again.")
+            return False
+        if starred is None:
+            T.failure("star", f"could not verify your star ({STAR_ERROR or st}). BadgeMaxxer needs this check to run.")
+            return False
+        if not starred:
+            T.failure("star", f"you have not starred {STAR_REPO}. Star it, then run BadgeMaxxer again.")
+            return False
+        if not quiet:
+            T.success("star", "verified, thanks for the star")
+        return True
 
     def start(self) -> None:
         zoom_out_terminal()
@@ -2955,7 +2972,6 @@ class ApplicationController:
         return value
 
     def _pick_number(self, title: str, presets: list, fmt, default, ask_custom):
-        """Preset list + Custom + Back. Starts on the default so enter accepts it. Returns value, BACK_TO_MENU or None."""
         options = [fmt(v) for v in presets] + ["Custom...", "Back to Main menu"]
         idx = arrow_menu(title, options, start=presets.index(default) if default in presets else 0)
         if idx is None or idx == len(presets) + 1:
@@ -3034,7 +3050,6 @@ class ApplicationController:
         self._pause()
 
     def _pick_stream_hours(self, allow_zero: bool = False, fresh_screen: bool = False) -> float | None:
-        """Tier menu (arrows + enter). A tier means the hours still needed to reach it; the last entry asks for a number."""
         T = self.terminal
         if fresh_screen:
             T.display_header()
@@ -3240,8 +3255,6 @@ class ApplicationController:
         input(f"  {T.COLOR_PRIMARY}›{T.COLOR_RESET} Press enter to continue")
 
     def _choose_stream_target(self) -> tuple[str, str] | None:
-        """Menu: 3 busiest servers (joins their most crowded voice channel), manual entry, back.
-        Returns a validated (guild_id, channel_id) or None to go back."""
         C = self.stream_console
         props = self.runtime_context.encoded_properties
         st, me = _discord_api_get("https://discord.com/api/v9/users/@me", self.state.token, props)
@@ -3305,7 +3318,6 @@ class ApplicationController:
             print()
 
     def _browse_stream_targets(self, all_guilds: list[dict]) -> tuple[str, str]:
-        """Pick a server you can stream in, then one of its streamable voice channels. ('', '') on back."""
         C = self.stream_console
         token, props = self.state.token, self.runtime_context.encoded_properties
         me_id = extract_account_snowflake(token)
@@ -3356,7 +3368,6 @@ class ApplicationController:
             return sv["id"], ok[j][0]
 
     def _ask_stream_target_manually(self) -> tuple[str, str]:
-        """Server and voice channel by id or exact name. Empty input reuses the last values. ('', '') on failure."""
         C = self.stream_console
         props = self.runtime_context.encoded_properties
         last_g, last_c = self.state.last_guild_id, self.state.last_channel_id
@@ -3376,7 +3387,6 @@ class ApplicationController:
         return guild_id, channel_id
 
     def run_gateway_live_streamer(self, hours: float = 0.0) -> None:
-        """Start a headless Go Live stream in a voice channel."""
         target = self._choose_stream_target()
         if not target:
             return
@@ -3451,7 +3461,10 @@ class ApplicationController:
             print()
             if choice is None or choice == 8:
                 break
-            elif choice == 0:
+            if not self._star_gate(quiet=True):
+                T.failure("star", "Star check failed, BadgeMaxxer is stopping.")
+                break
+            if choice == 0:
                 self.level_up_all()
             elif choice == 1:
                 self.trigger_playtime_ingestion(TIME_DEFAULT_GAMES, TIME_DEFAULT_HOURS, "Game Time")
