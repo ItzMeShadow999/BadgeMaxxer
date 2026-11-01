@@ -104,7 +104,7 @@ TOKEN_HELP = (
     "Never share your token. Anyone with it has full access to the account.",
 )
 BACK_TO_MENU = -1.0
-TERMINAL_ZOOM_OUT_STEPS = 5
+TERMINAL_ZOOM_OUT_STEPS = 2
 TERMINAL_MIN_COLS = 150
 TERMINAL_MIN_ROWS = 45
 
