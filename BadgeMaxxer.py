@@ -104,9 +104,6 @@ TOKEN_HELP = (
     "Never share your token. Anyone with it has full access to the account.",
 )
 BACK_TO_MENU = -1.0
-TERMINAL_ZOOM_OUT_STEPS = 0
-TERMINAL_MIN_COLS = 150
-TERMINAL_MIN_ROWS = 45
 
 DESKTOP_CLIENT_VERSION = "1.0.9253"
 DESKTOP_BUILD_IDENTIFIER = 594031
@@ -401,25 +398,33 @@ class Banner:
 BANNER = Banner()
 atexit.register(BANNER.release)
 
+TERMINAL_ZOOM_OUT_MAX = 10
+
+
+def banner_fits() -> bool:
+    cols, rows = shutil.get_terminal_size((120, 30))
+    return cols > BANNER.art_width and rows >= BANNER.MIN_ROWS_FULL
+
 
 def zoom_out_terminal() -> None:
-    if os.name != "nt" or not sys.stdout.isatty():
+    if os.name != "nt" or not sys.stdout.isatty() or banner_fits():
         return
     try:
         if os.environ.get("WT_SESSION"):
-            if TERMINAL_ZOOM_OUT_STEPS <= 0:
-                return
             import ctypes
             keybd = ctypes.windll.user32.keybd_event
-            for _ in range(TERMINAL_ZOOM_OUT_STEPS):
+            for _ in range(TERMINAL_ZOOM_OUT_MAX):
                 keybd(0x11, 0, 0, 0)
                 keybd(0xBD, 0, 0, 0)
                 keybd(0xBD, 0, 2, 0)
                 keybd(0x11, 0, 2, 0)
-                time.sleep(0.05)
+                time.sleep(0.25)
+                if banner_fits():
+                    break
             time.sleep(0.3)
         else:
-            os.system(f"mode con: cols={TERMINAL_MIN_COLS} lines={TERMINAL_MIN_ROWS}")
+            cols, rows = shutil.get_terminal_size((120, 30))
+            os.system(f"mode con: cols={max(cols, BANNER.art_width + 2)} lines={max(rows, BANNER.MIN_ROWS_FULL + 1)}")
     except Exception:
         pass
 
