@@ -15,10 +15,12 @@ Built to keep going:
   * waits for the target to go live and re-watches when the stream restarts
   * writes a redacted debug log (watcher_debug.log) you can paste when asked
 
-Token handling: read from the DISCORD_MAIN_TOKEN environment variable or typed
-at a hidden prompt. Never saved to disk, never written to the debug log, and
-deliberately NOT read from BadgeMaxxer's session.json (that file holds the
-other account's token).
+Token handling: read from the DISCORD_MAIN_TOKEN environment variable, else
+from watcher_session.json (saved on first run), else typed at a hidden prompt
+and saved there. A token from the environment variable is never saved. The
+token is never written to the debug log, and is deliberately NOT read from
+BadgeMaxxer's session.json (that file holds the other account's token). A
+rejected token (4004) is deleted automatically; --reset-token forgets it.
 
 Requires: pip install websockets davey
 
@@ -228,15 +230,54 @@ def async_input(prompt):
     return fut
 
 
+TOKEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watcher_session.json")
+
+
+def load_saved_token():
+    try:
+        with open(TOKEN_PATH, encoding="utf-8") as fh:
+            return str(json.load(fh).get("token", "")).strip()
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def save_token(token):
+    try:
+        with open(TOKEN_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"token": token}, fh, indent=2)
+    except OSError as exc:
+        print(f"Could not save the token ({exc}).")
+        return
+    try:
+        os.chmod(TOKEN_PATH, 0o600)
+    except OSError:
+        pass
+
+
+def forget_token():
+    try:
+        os.remove(TOKEN_PATH)
+    except OSError:
+        pass
+
+
 def get_token():
     token = os.environ.get("DISCORD_MAIN_TOKEN", "").strip()
+    save = False
     if not token:
-        token = getpass.getpass("Alt account token (hidden, not saved): ").strip()
+        token = load_saved_token()
+        if token:
+            print("Main account token loaded from watcher_session.json.")
+    if not token:
+        token = getpass.getpass("Main account token (hidden, saved to watcher_session.json): ").strip()
+        save = True
     token = token.strip('"').strip("'")
     if not token:
         sys.exit("No token provided.")
     if " " in token or len(token) < 30:
         print("That does not look like a user token (too short or contains spaces).")
+    if save:
+        save_token(token)
     return token
 
 
@@ -725,6 +766,9 @@ class StreamWatcher:
                     f"{GATEWAY_CLOSE_CODES.get(code, '')}".rstrip())
                 if code in FATAL_GATEWAY_CODES:
                     self.fatal = True
+                    if code == 4004:
+                        forget_token()
+                        log("Saved token removed. Run the watcher again to enter a new one.")
                 elif code in (4007, 4009):
                     self.session_id = self.seq = self.resume_url = None
                 return f"closed {code}"
@@ -1076,6 +1120,7 @@ def parse_args():
     ap.add_argument("--max-attempts", type=int, default=DEFAULT_MAX_ATTEMPTS,
                     help="how many attempts before giving up")
     ap.add_argument("--log", default="watcher_debug.log", help="debug log path")
+    ap.add_argument("--reset-token", action="store_true", help="forget the saved token and ask again")
     return ap.parse_args()
 
 
@@ -1088,6 +1133,8 @@ async def main(args):
     preset = None
     if args.guild and args.channel and args.guild.isdigit() and args.channel.isdigit():
         preset = (args.guild, args.channel)
+    if args.reset_token:
+        forget_token()
     token = get_token()
     watcher = StreamWatcher(token, target_id, max_attempts=max(1, args.max_attempts), preset=preset)
     log("Connecting to the gateway.")
