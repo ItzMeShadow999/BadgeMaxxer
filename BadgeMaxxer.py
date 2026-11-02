@@ -3475,7 +3475,7 @@ class ApplicationController:
         if guild_id and channel_id:
             cmd += ["--guild", guild_id, "--channel", channel_id]
         proc = subprocess.Popen(cmd, cwd=str(WATCHER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
-        C.ok("watcher", "opened in a new window, it asks for your MAIN account token there (hidden, never saved)")
+        C.ok("watcher", "opened in a new window, it asks for your MAIN account token there once (hidden, saved to Watcher/watcher_session.json)")
         return proc
 
     def start_watcher(self) -> None:
