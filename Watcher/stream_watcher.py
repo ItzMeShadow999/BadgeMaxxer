@@ -231,7 +231,7 @@ def async_input(prompt):
 def get_token():
     token = os.environ.get("DISCORD_MAIN_TOKEN", "").strip()
     if not token:
-        token = getpass.getpass("Main account token (hidden, not saved): ").strip()
+        token = getpass.getpass("Alt account token (hidden, not saved): ").strip()
     token = token.strip('"').strip("'")
     if not token:
         sys.exit("No token provided.")
