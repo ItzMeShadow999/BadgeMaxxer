@@ -76,6 +76,8 @@ TIME_DEFAULT_GAMES = 3
 TIME_DEFAULT_HOURS = 10.0
 VARIETY_DEFAULT_HOURS = 1.0
 STREAM_DEFAULT_HOURS = 1.0
+STREAM_ROTATE_SEC = 4 * 3600
+STREAM_REJOIN_GAP_SEC = 3.0
 NETWORK_COOLDOWN_SEC = 0.3
 TOKEN_EXPIRY_THRESHOLD_SEC = 12 * 3600
 TOKEN_SNIPPET = (
@@ -2046,6 +2048,8 @@ class GatewayStreamEngine:
         self.stream_ever_active = False
         self._stream_recreate_attempts = 0
         self._user_left_vc = False
+        self._rotating = False
+        self._segment_start = 0.0
         self.on_live = None
 
         self._status_thread: threading.Thread | None = None
@@ -2073,6 +2077,8 @@ class GatewayStreamEngine:
         self.stream_ever_active = False
         self._stream_recreate_attempts = 0
         self._user_left_vc = False
+        self._rotating = False
+        self._segment_start = 0.0
 
         event_thread = threading.Thread(
             target=self._event_loop,
@@ -2311,6 +2317,12 @@ class GatewayStreamEngine:
                             last_hb = time.time()
                             continue
 
+                if (self.stream_connected and not self._rotating and self._segment_start
+                        and now - self._segment_start >= STREAM_ROTATE_SEC):
+                    self._rotate_stream(guild_id, channel_id)
+                    last_hb = time.time()
+                    continue
+
                 msg = self.ws.recv(timeout=1.0)
                 if not msg:
                     continue
@@ -2407,6 +2419,31 @@ class GatewayStreamEngine:
                     break
                 last_hb = time.time()
 
+    def _rotate_stream(self, guild_id: str, channel_id: str) -> None:
+        C = self.console
+        C.warn("stream", "4h reached, leaving and rejoining before Discord's 5h limit...")
+        self._rotating = True
+        self._segment_start = time.time()
+        self.stream_connected = False
+        self.voice_connected = False
+        if self.stream_key:
+            self.ws.send(json.dumps({"op": 19, "d": {"stream_key": self.stream_key}}))
+        self.ws.send(json.dumps({
+            "op": 4,
+            "d": {"guild_id": guild_id, "channel_id": None, "self_mute": False, "self_deaf": False, "self_video": False},
+        }))
+        for conn in (self.stream_conn, self.voice_conn):
+            if conn:
+                conn.close()
+        self.stream_conn = None
+        self.voice_conn = None
+        time.sleep(STREAM_REJOIN_GAP_SEC)
+        self.ws.send(json.dumps({
+            "op": 4,
+            "d": {"guild_id": guild_id, "channel_id": channel_id, "self_mute": False, "self_deaf": False, "self_video": False},
+        }))
+        C.ok("voice", f"rejoining voice channel {C.ORANGE}{channel_id}{C.RESET}")
+
     def _handle_dispatch(self, event_type: str, d: dict, guild_id: str, channel_id: str) -> None:
         C = self.console
 
@@ -2435,6 +2472,12 @@ class GatewayStreamEngine:
                 new_session = d.get("session_id", "")
                 if new_session:
                     self.voice_session_id = new_session
+
+                if self._rotating:
+                    if active_channel is None:
+                        return
+                    if str(active_channel) == str(channel_id):
+                        self._rotating = False
 
                 if (self.voice_connected or self.stream_connected or self.stream_ever_active):
                     if active_channel is None:
@@ -2537,6 +2580,8 @@ class GatewayStreamEngine:
             self.stream_connected = True
             self.stream_ever_active = True
             self._stream_recreate_attempts = 0
+            self._rotating = False
+            self._segment_start = time.time()
             if first_live and self.on_live:
                 try:
                     self.on_live()
@@ -2601,7 +2646,7 @@ class GatewayStreamEngine:
                 self.stream_conn.close()
                 self.stream_conn = None
 
-            if not self.running or not self.voice_connected or self._user_left_vc:
+            if not self.running or not self.voice_connected or self._user_left_vc or self._rotating:
                 return
 
             if self._stream_recreate_attempts < 3:
