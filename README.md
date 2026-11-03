@@ -50,10 +50,23 @@
 PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/ItzMeShadow999/BadgeMaxxer/main/install.ps1 | iex
+irm https://github.com/ItzMeShadow999/BadgeMaxxer/releases/latest/download/install.ps1 | iex
 ```
 
 This downloads BadgeMaxxer and the Watcher into `%USERPROFILE%\BadgeMaxxer`, installs the Python packages, and starts it. Your `session.json` is never overwritten.
+
+### Verified installs
+
+The installer pins to a release tag, downloads that release's `SHA256SUMS`, and checks every file against it before saving. A mismatch aborts the install and nothing is written.
+
+To pin an exact version, or to read the installer before running it:
+
+```powershell
+$env:BADGEMAXXER_TAG = "v1.0.0"
+irm https://github.com/ItzMeShadow999/BadgeMaxxer/releases/download/v1.0.0/install.ps1 -OutFile install.ps1
+notepad install.ps1
+.\install.ps1
+```
 
 ## Usage
 
