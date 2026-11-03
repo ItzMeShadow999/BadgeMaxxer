@@ -111,14 +111,12 @@ For stream time to count:
 
 This tool uses a user token and sends generated telemetry and streaming activity, which violates Discord's Terms of Service. Accounts using it can be banned. Use a throwaway account, at your own risk. This project is not affiliated with Discord.
 
-
-<sub><sub><sub><sub><sub><b>Credits</b></sub></sub></sub></sub></sub>
-<br>
-<sub><sub><sub><sub><sub>BadgeMaxxer is built on the discord-badge-spoofer by revere-group</sub></sub></sub></sub></sub>
-
-
 <div align="center">
 
 <sub>Made by <a href="https://github.com/ItzMeShadow999">ItzMeShadow999</a></sub>
 
 </div>
+
+<sub><sub><sub><sub><sub><b>Credits</b></sub></sub></sub></sub></sub>
+<br>
+<sub><sub><sub><sub><sub>BadgeMaxxer is built on the discord-badge-spoofer by revere-group</sub></sub></sub></sub></sub>
