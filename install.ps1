@@ -1,7 +1,7 @@
 $Owner  = "ItzMeShadow999"
 $Repo   = "badgemaxxer"
-$Branch = "main"
-$Base   = "https://raw.githubusercontent.com/$Owner/$Repo/$Branch"
+$Tag    = $env:BADGEMAXXER_TAG
+$Releases = "https://github.com/$Owner/$Repo/releases"
 $Dir    = Join-Path $env:USERPROFILE "BadgeMaxxer"
 $Files  = @("BadgeMaxxer.py", "Watcher/stream_watcher.py")
 $Packages = @("websockets", "davey", "cryptography")
@@ -25,6 +25,13 @@ function Find-Python {
     return $null
 }
 
+function Resolve-Tag {
+    if ($Tag) { return $Tag }
+    $api = "https://api.github.com/repos/$Owner/$Repo/releases/latest"
+    $release = Invoke-RestMethod -UseBasicParsing -Uri $api -Headers @{ "User-Agent" = "BadgeMaxxer-installer" }
+    return $release.tag_name
+}
+
 function Install-BadgeMaxxer {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     $ProgressPreference = "SilentlyContinue"
@@ -32,6 +39,26 @@ function Install-BadgeMaxxer {
     Write-Host ""
     Write-Host "  BadgeMaxxer installer" -ForegroundColor Yellow
     Write-Host ""
+
+    # Pin to a release tag and load its SHA256SUMS before anything is installed.
+    $sumsTemp = Join-Path ([IO.Path]::GetTempPath()) ("BadgeMaxxer-SHA256SUMS-" + [Guid]::NewGuid().ToString("N"))
+    $expected = @{}
+    try {
+        $Ref = Resolve-Tag
+        if ($Ref -notmatch '^[A-Za-z0-9._-]+$') { throw "invalid release tag '$Ref'" }
+        $Base = "https://raw.githubusercontent.com/$Owner/$Repo/$Ref"
+        Write-Step "Release $Ref, fetching SHA256SUMS ..."
+        Invoke-WebRequest -UseBasicParsing -Uri "$Releases/download/$Ref/SHA256SUMS" -OutFile $sumsTemp
+        foreach ($line in Get-Content -Path $sumsTemp) {
+            if ($line -match '^([0-9a-fA-F]{64})\s+\*?(.+?)\s*$') { $expected[$Matches[2]] = $Matches[1].ToLower() }
+        }
+        if ($expected.Count -eq 0) { throw "SHA256SUMS is empty or unreadable" }
+    } catch {
+        Write-Bad "Could not load release checksums, nothing was installed: $($_.Exception.Message)"
+        return
+    } finally {
+        Remove-Item -Force -ErrorAction SilentlyContinue $sumsTemp
+    }
 
     $py = Find-Python
     if (-not $py -and (Get-Command winget -ErrorAction SilentlyContinue)) {
@@ -54,10 +81,14 @@ function Install-BadgeMaxxer {
         Write-Step "Fetching $file ...."
         try {
             Invoke-WebRequest -UseBasicParsing -Uri "$Base/$file" -OutFile $temp
+            $actual = (Get-FileHash -Algorithm SHA256 -Path $temp).Hash.ToLower()
+            if (-not $expected.ContainsKey($file)) { throw "no checksum listed for $file in SHA256SUMS" }
+            if ($actual -ne $expected[$file]) { throw "checksum mismatch (expected $($expected[$file]), got $actual)" }
+            Write-Ok "Verified $file (sha256 $($actual.Substring(0, 16))...)"
             Move-Item -Force -Path $temp -Destination $target
         } catch {
             Remove-Item -Force -ErrorAction SilentlyContinue $temp
-            Write-Bad "Could not fetch $file : $($_.Exception.Message)"
+            Write-Bad "Could not install $file : $($_.Exception.Message)"
             return
         }
     }
