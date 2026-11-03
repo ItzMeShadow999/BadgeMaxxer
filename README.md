@@ -114,7 +114,7 @@ This tool uses a user token and sends generated telemetry and streaming activity
 
 ### Credits
 
-BadgeMaxxer is built on the game time and streaming scripts (`games.py` and `stream.py`) from sonujana26's discord-badge-maximizer, MIT licensed, Copyright (c) 2026 Sonu Jana
+BadgeMaxxer is built on the game time and streaming scripts (`games.py` and `stream.py`) from sonujana26's discord-badge-maximizer, MIT licensed, Copyright (c) 2026 Sonu Jana.
 
 <div align="center">
 
