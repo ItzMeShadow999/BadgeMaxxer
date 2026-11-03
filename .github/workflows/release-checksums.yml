@@ -1,0 +1,28 @@
+name: release-checksums
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  checksums:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout release tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+
+      - name: Generate SHA256SUMS
+        run: |
+          find BadgeMaxxer.py Watcher -type f | sort | xargs sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$TAG" SHA256SUMS install.ps1 --clobber
