@@ -431,6 +431,52 @@ def zoom_out_terminal() -> None:
         pass
 
 
+def force_black_console() -> None:
+    if os.name != "nt" or not sys.stdout.isatty() or os.environ.get("WT_SESSION"):
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class COORD(ctypes.Structure):
+            _fields_ = [("X", ctypes.c_short), ("Y", ctypes.c_short)]
+
+        class SMALL_RECT(ctypes.Structure):
+            _fields_ = [("Left", ctypes.c_short), ("Top", ctypes.c_short),
+                        ("Right", ctypes.c_short), ("Bottom", ctypes.c_short)]
+
+        class CONSOLE_SCREEN_BUFFER_INFOEX(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_ulong),
+                ("dwSize", COORD),
+                ("dwCursorPosition", COORD),
+                ("wAttributes", ctypes.c_ushort),
+                ("srWindow", SMALL_RECT),
+                ("dwMaximumWindowSize", COORD),
+                ("wPopupAttributes", ctypes.c_ushort),
+                ("bFullscreenSupported", ctypes.c_int),
+                ("ColorTable", ctypes.c_ulong * 16),
+            ]
+
+        kernel = ctypes.windll.kernel32
+        kernel.GetStdHandle.restype = wintypes.HANDLE
+        handle = kernel.GetStdHandle(-11)
+        info = CONSOLE_SCREEN_BUFFER_INFOEX()
+        info.cbSize = ctypes.sizeof(info)
+        if not kernel.GetConsoleScreenBufferInfoEx(handle, ctypes.byref(info)):
+            return
+        if (info.wAttributes >> 4) & 0xF == 0 and info.ColorTable[0] == 0:
+            return
+        info.ColorTable[0] = 0
+        fg = info.wAttributes & 0x0F
+        info.wAttributes = fg if fg else 0x07
+        info.srWindow.Right += 1
+        info.srWindow.Bottom += 1
+        kernel.SetConsoleScreenBufferInfoEx(handle, ctypes.byref(info))
+    except Exception:
+        pass
+
+
 def read_key() -> str:
     if os.name == "nt":
         import msvcrt
@@ -576,6 +622,7 @@ class TerminalInterface:
             pass
         if sys.platform == "win32":
             self._activate_vt_processing()
+            force_black_console()
 
     @staticmethod
     def _activate_vt_processing() -> None:
