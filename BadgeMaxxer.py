@@ -111,6 +111,8 @@ DESKTOP_CLIENT_VERSION = "1.0.9253"
 DESKTOP_BUILD_IDENTIFIER = 594031
 PLATFORM_BUILD_IDENTIFIER = 88414
 PLATFORM_OS_REVISION = "10.0.26200"
+CLIENT_LOCALE = "en-GB"
+CLIENT_TIMEZONE = "Europe/Oslo"
 USER_AGENT_IDENTIFIER = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) discord/1.0.9253 Chrome/148.0.7778.280 "
@@ -770,7 +772,7 @@ def generate_fallback_properties() -> dict:
         "os_version": PLATFORM_OS_REVISION,
         "os_arch": "x64",
         "app_arch": "x64",
-        "system_locale": "en-US",
+        "system_locale": CLIENT_LOCALE,
         "has_client_mods": False,
         "browser_user_agent": USER_AGENT_IDENTIFIER,
         "browser_version": "42.7.1",
@@ -1000,7 +1002,7 @@ class TelemetryEventFabricator:
             "client_performance_memory": None,
             "cpu_core_count": None,
             "accessibility_features": 0,
-            "rendered_locale": "en-US",
+            "rendered_locale": CLIENT_LOCALE,
             "launch_signature": self.context.launch_signature_id,
             "client_rtc_state": None,
             "client_app_state": "focused",
@@ -1061,7 +1063,7 @@ class TelemetryEventFabricator:
         encoded_body = json.dumps(envelope).encode("utf-8")
         network_headers = {
             "accept": "*/*",
-            "accept-language": "en-US",
+            "accept-language": CLIENT_LOCALE,
             "authorization": self.state.token,
             "content-type": "application/json",
             "cookie": self.state.cookie,
@@ -1069,8 +1071,8 @@ class TelemetryEventFabricator:
             "referer": "https://discord.com/channels/@me",
             "user-agent": USER_AGENT_IDENTIFIER,
             "x-debug-options": "bugReporterEnabled",
-            "x-discord-locale": "en-US",
-            "x-discord-timezone": "UTC",
+            "x-discord-locale": CLIENT_LOCALE,
+            "x-discord-timezone": CLIENT_TIMEZONE,
             "x-super-properties": self.context.encoded_properties,
         }
 
