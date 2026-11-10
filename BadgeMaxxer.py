@@ -85,14 +85,13 @@ TOKEN_SNIPPET = (
     ".some(e=>e.exports?.setToken&&(w.t=e.exports.getToken()))}catch{}}]),w.t))"
 )
 COOKIE_HELP = (
-    "How to get cf_clearance (the console cannot read it, it is an HttpOnly cookie):",
+    "How to get your cookie (it is in the @me request in the Network tab):",
     "1. Open https://discord.com/app in your browser and log in.",
-    "2. Press F12 (Ctrl+Shift+I) to open DevTools.",
-    "3. Chrome/Edge: Application tab > Cookies > https://discord.com.",
-    "   Firefox: Storage tab > Cookies > https://discord.com.",
-    "4. Find cf_clearance and copy its Value.",
-    "   Or: Network tab > reload > click any discord.com request > Request Headers > cookie.",
-    "5. Paste it below as cf_clearance=VALUE, or paste the whole cookie line or a Copy as cURL (bash) of the @me request.",
+    "2. Press F12 (Ctrl+Shift+I) and open the Network tab.",
+    "3. Type @me in the filter box, then reload the page (F5) so the request shows up.",
+    "4. Click the @me request (discord.com/api/v9/users/@me).",
+    "5. Headers > Request Headers > find cookie and copy its whole value.",
+    "   Or: right-click the @me request > Copy > Copy as cURL (bash) and paste that, the cookie is picked out for you.",
     "Not in the list? Cloudflare only sets it after a challenge. Try a private window or a fresh network.",
     "It is tied to your IP and this script's User-Agent, and it expires. Use 'Refresh Credentials & Cookie' in the menu to update it.",
 )
@@ -667,7 +666,7 @@ class TerminalInterface:
 _HELP_TOKENS = re.compile(
     r"(?P<url>https://[^\s,]+?(?=[.,]?(?:\s|$)))"
     r"|(?P<key>cf_clearance=VALUE|cf_clearance|Ctrl\+Shift\+I|F12|Application tab|Storage tab|"
-    r"Cookies|Value|cookie header|cookie|Network tab|Request Headers|authorization)"
+    r"Cookies|Value|cookie header|cookie|Network tab|Request Headers|authorization|@me)"
 )
 
 
@@ -2939,16 +2938,7 @@ class ApplicationController:
             return
 
         if not self.state.cookie:
-            self.terminal.log("fetching base cookies from discord.com...")
-            base = fetch_base_cookies()
-            if base:
-                self.state.cookie = base
-                self.state.persist()
-                self.terminal.success("cookie", "Base cookies fetched and saved (no cf_clearance)")
-                self.terminal.log("If requests get blocked (403), add cf_clearance via 'Refresh Credentials & Cookie'.")
-        if not self.state.cookie:
-            self.terminal.display_header()
-            self._prompt_clearance_cookie()
+            self._choose_cookie()
         else:
             self.terminal.success("auth", "Clearance cookie loaded from state")
 
@@ -3004,6 +2994,23 @@ class ApplicationController:
             self.state.persist()
             self.terminal.success("token", "Saved to local state")
 
+    def _choose_cookie(self, choice: int = -1) -> None:
+        T = self.terminal
+        if choice < 0:
+            choice = arrow_menu("Cookie", ["Auto fetch cookies", "Paste your cookie"])
+        if choice == 0:
+            T.log("fetching base cookies from discord.com...")
+            base = fetch_base_cookies()
+            if base:
+                self.state.cookie = base
+                self.state.persist()
+                T.success("cookie", "Base cookies fetched and saved (no cf_clearance)")
+                T.log("If requests get blocked (403), choose 'Paste your cookie' and use the cookie from the @me request.")
+            else:
+                T.failure("cookie", "Could not fetch cookies, choose 'Paste your cookie' instead.")
+        elif choice == 1:
+            self._prompt_clearance_cookie()
+
     def _prompt_clearance_cookie(self) -> None:
         print_cookie_help(self.terminal)
         self.terminal.log("Paste your cf_clearance cookie header value:")
@@ -3015,15 +3022,9 @@ class ApplicationController:
 
     def _reconfigure_credentials(self) -> None:
         T = self.terminal
-        T.log("Update cookie header? [y/n]")
-        ans = input(f"  {T.COLOR_MUTED}›{T.COLOR_RESET} ").strip().lower()
-        if ans in ("y", "yes"):
-            print_cookie_help(T)
-            T.log("Paste fresh cookie header:")
-            new_ck = extract_cookie_header(input(f"  {T.COLOR_MUTED}cookie:{T.COLOR_RESET} "))
-            if new_ck:
-                self.state.cookie = new_ck
-                T.success("cookie", "Updated")
+        sel = arrow_menu("Cookie", ["Keep current cookie", "Auto fetch cookies", "Paste your cookie"])
+        if sel in (1, 2):
+            self._choose_cookie(sel - 1)
 
         T.log("Refreshing analytics token from Discord...")
         try:
