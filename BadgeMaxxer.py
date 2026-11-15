@@ -3354,7 +3354,7 @@ class ApplicationController:
         duration_ms = int(hours * 3600 * 1000)
         total_aggregate = len(selected_titles) * hours
         print()
-        T.log(f"Submitting {T.COLOR_PRIMARY}{hours:g}h{T.COLOR_TEXT} across {T.COLOR_PRIMARY}{len(selected_titles)}{T.COLOR_TEXT} titles ({total_aggregate:,.0f}h total)")
+        T.log(f"Submitting {T.COLOR_PRIMARY}{hours:g}h{T.COLOR_TEXT} across {T.COLOR_PRIMARY}{len(selected_titles)}{T.COLOR_TEXT} titles ({total_aggregate:,.1f}h total)")
         T.separator()
 
         engine = IngestionPipeline(self.fabricator, self.terminal)
@@ -3364,7 +3364,7 @@ class ApplicationController:
         )
 
         print()
-        T.success("completed", f"{accepted}/{len(selected_titles)} titles processed ({accepted * hours:,.0f}h total)")
+        T.success("completed", f"{accepted}/{len(selected_titles)} titles processed ({accepted * hours:,.1f}h total)")
         self.state.total_games_claimed += accepted
         self.state.total_hours_claimed += accepted * hours
         self.state.persist()
@@ -3797,7 +3797,7 @@ class ApplicationController:
         while True:
             T.display_header()
             T.log(f"Detectable Titles: {T.COLOR_PRIMARY}{len(self.catalog)}{T.COLOR_TEXT}")
-            T.log(f"Cumulative Logged: {T.COLOR_PRIMARY}{self.state.total_games_claimed}{T.COLOR_TEXT} titles · {T.COLOR_PRIMARY}{self.state.total_hours_claimed:,.0f}h{T.COLOR_TEXT} playtime")
+            T.log(f"Cumulative Logged: {T.COLOR_PRIMARY}{self.state.total_games_claimed}{T.COLOR_TEXT} titles · {T.COLOR_PRIMARY}{self.state.total_hours_claimed:,.1f}h{T.COLOR_TEXT} playtime")
             T.log(f"Total Stream Hours: {T.COLOR_PRIMARY}{self.state.total_stream_hours_claimed:,.1f}h{T.COLOR_TEXT} ({self.state.total_stream_sessions} sessions)")
             print()
 
