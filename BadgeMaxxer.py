@@ -1485,6 +1485,8 @@ class MiniWebSocket:
                     continue
                 payload += chunk
                 fin = bool(nxt[0] & 0x80)
+            if opcode == 0x2:
+                return {"op": "binary"}
             return json.loads(payload.decode("utf-8"))
         except Exception:
             self.close()
