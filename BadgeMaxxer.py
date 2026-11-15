@@ -855,7 +855,13 @@ class AccountSessionState:
             except Exception:
                 pass
         existing.update(asdict(self))
-        STATE_STORAGE_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        if os.name == "nt":
+            STATE_STORAGE_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        else:
+            fd = os.open(STATE_STORAGE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                os.fchmod(fh.fileno(), 0o600)
+                fh.write(json.dumps(existing, indent=2))
 
     def save(self) -> None:
         self.persist()

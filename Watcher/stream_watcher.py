@@ -243,8 +243,14 @@ def load_saved_token():
 
 def save_token(token):
     try:
-        with open(TOKEN_PATH, "w", encoding="utf-8") as fh:
-            json.dump({"token": token}, fh, indent=2)
+        if os.name == "nt":
+            with open(TOKEN_PATH, "w", encoding="utf-8") as fh:
+                json.dump({"token": token}, fh, indent=2)
+        else:
+            fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                os.fchmod(fh.fileno(), 0o600)
+                json.dump({"token": token}, fh, indent=2)
     except OSError as exc:
         print(f"Could not save the token ({exc}).")
         return
