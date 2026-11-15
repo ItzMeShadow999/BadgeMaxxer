@@ -69,7 +69,7 @@ STATE_STORAGE_PATH = WORKSPACE_DIR / "session.json"
 WATCHER_DIR = WORKSPACE_DIR / "Watcher"
 WATCHER_SCRIPT = WATCHER_DIR / "stream_watcher.py"
 WATCHER_PACKAGES = ("websockets", "davey")
-DATABASE_STORAGE_PATH = WORKSPACE_DIR.parent / "data" / "games.json"
+DATABASE_STORAGE_PATH = WORKSPACE_DIR / "data" / "games.json"
 
 REST_IDENTITY_URL = "https://discord.com/api/v9/users/@me?with_analytics_token=true"
 DISCORD_USERS_API = "https://discord.com/api/v9/users"
@@ -112,6 +112,8 @@ TOKEN_HELP = (
     "Never share your token. Anyone with it has full access to the account.",
 )
 BACK_TO_MENU = -1.0
+CREDENTIALS_MENU = "Refresh Credentials & Cookie"
+ESC_SEQ_TIMEOUT = 0.5
 
 DESKTOP_CLIENT_VERSION = "1.0.9253"
 DESKTOP_BUILD_IDENTIFIER = 594031
@@ -339,6 +341,7 @@ class Banner:
         self.art = [ln.rstrip() for ln in BANNER_ART.strip("\n").split("\n")]
         self.art_width = max(len(ln) for ln in self.art)
         self.pinned = False
+        self.region_top = 1
 
     def build(self, cols: int, rows: int) -> list[str]:
         if cols > self.art_width and rows >= self.MIN_ROWS_FULL:
@@ -389,10 +392,13 @@ class Banner:
         cols, rows = shutil.get_terminal_size((120, 30))
         lines = self.build(cols, rows)
         top = len(lines) + 1
+        self.pinned = False
+        self.region_top = 1
         out = "\x1b]0;BadgeMaxxer\x07\x1b[r\x1b[2J\x1b[3J\x1b[H" + "\n".join(lines) + "\n"
         if rows - top >= self.MIN_ROWS_BODY:
             out += f"\x1b[{top};{rows}r\x1b[{top};1H"
             self.pinned = True
+            self.region_top = top
         sys.stdout.write(out)
         sys.stdout.flush()
 
@@ -607,10 +613,15 @@ def read_key() -> str:
         tty.setraw(fd)
         ch = os.read(fd, 1).decode("utf-8", "ignore")
         if ch == "\x1b":
-            if select.select([fd], [], [], 0.05)[0]:
-                seq = os.read(fd, 2).decode("utf-8", "ignore")
-                return {"[A": "up", "[B": "down", "[C": "right", "[D": "left", "OA": "up", "OB": "down"}.get(seq, "")
-            return "esc"
+            seq = ""
+            while len(seq) < 2 and select.select([fd], [], [], ESC_SEQ_TIMEOUT)[0]:
+                part = os.read(fd, 1)
+                if not part:
+                    break
+                seq += part.decode("utf-8", "ignore")
+            if not seq:
+                return "esc"
+            return {"[A": "up", "[B": "down", "[C": "right", "[D": "left", "OA": "up", "OB": "down"}.get(seq, "")
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old)
     if not ch:
@@ -620,6 +631,11 @@ def read_key() -> str:
     if ch == "\x03":
         raise KeyboardInterrupt
     return ch.lower()
+
+
+def menu_capacity() -> int:
+    rows = shutil.get_terminal_size((120, 30)).lines
+    return max(3, rows - BANNER.region_top - 1)
 
 
 def arrow_menu(title: str, options: Sequence[str], hint: str = "↑/↓ move · enter select", start: int = 0) -> int | None:
@@ -632,21 +648,30 @@ def arrow_menu(title: str, options: Sequence[str], hint: str = "↑/↓ move · 
         return int(raw) - 1 if raw.isdigit() and 1 <= int(raw) <= n else None
 
     sel = start if 0 <= start < n else 0
+    view = min(n, menu_capacity())
+    off = max(0, min(sel - view // 2, n - view))
 
     def paint(first: bool) -> None:
         buf: list[str] = []
         if not first:
-            buf.append(f"\x1b[{n}A")
+            buf.append(f"\x1b[{view}A")
         room = max(20, shutil.get_terminal_size((120, 30)).columns - 8)
-        for i, raw in enumerate(options):
+        for i in range(off, off + view):
+            raw = options[i]
             opt = raw if len(raw) <= room else raw[: room - 1] + "…"
             base = GOLD_BOLD if i == sel else "\x1b[37m"
             if opt.startswith("Recommended"):
                 opt = "\x1b[92mRecommended" + base + opt[len("Recommended"):]
+            more = ""
+            if view < n:
+                if i == off and off > 0:
+                    more = " \x1b[90m▲"
+                elif i == off + view - 1 and off + view < n:
+                    more = " \x1b[90m▼"
             if i == sel:
-                buf.append(f"\r\x1b[2K   {GOLD_BOLD}› {opt}{ANSI_RESET}\n")
+                buf.append(f"\r\x1b[2K   {GOLD_BOLD}› {opt}{more}{ANSI_RESET}\n")
             else:
-                buf.append(f"\r\x1b[2K     {base}{opt}{ANSI_RESET}\n")
+                buf.append(f"\r\x1b[2K     {base}{opt}{more}{ANSI_RESET}\n")
         sys.stdout.write("".join(buf))
         sys.stdout.flush()
 
@@ -666,9 +691,13 @@ def arrow_menu(title: str, options: Sequence[str], hint: str = "↑/↓ move · 
                 return None
             else:
                 continue
+            if sel < off:
+                off = sel
+            elif sel >= off + view:
+                off = sel - view + 1
             paint(False)
     finally:
-        sys.stdout.write(f"\x1b[{n + 1}A\r\x1b[J\x1b[?25h")
+        sys.stdout.write(f"\x1b[{view + 1}A\r\x1b[J\x1b[?25h")
         sys.stdout.flush()
 
 
@@ -1225,7 +1254,7 @@ class IngestionPipeline:
             elif http_status in (401, 403):
                 self.terminal.failure(
                     f"batch {batch_index}",
-                    f"[{http_status}] Authentication failed. Refresh token/cookie via Option 3."
+                    f"[{http_status}] Authentication failed. Use '{CREDENTIALS_MENU}' in the menu to update your token/cookie."
                 )
                 return processed_successfully
             else:
@@ -1864,7 +1893,7 @@ def validate_stream_target(
     status, user_data = _discord_api_get("https://discord.com/api/v9/users/@me", token, super_props)
     if status == 401:
         C.err("auth", "authentication failed: your discord token is invalid or has expired (HTTP 401).")
-        C.info(f"{C.GREY}please update your token using Option 3 in the menu.{C.RESET}")
+        C.info(f"{C.GREY}please update your token using '{CREDENTIALS_MENU}' in the menu.{C.RESET}")
         return False, "unauthorized"
     if status != 200:
         C.err("auth", f"could not reach discord API (HTTP {status}: {user_data.get('message', 'network error')})")
@@ -2384,7 +2413,7 @@ class GatewayStreamEngine:
                         reason = m.get("reason", "")
                         if code == 4004:
                             C.err("auth", "fatal gateway authentication failure (code 4004: invalid token)")
-                            C.err("auth", "please use Option 3 in the menu to update your token.")
+                            C.err("auth", f"please use '{CREDENTIALS_MENU}' in the menu to update your token.")
                             self.running = False
                             return False
                     if m and m.get("op") == 10:
@@ -2455,7 +2484,7 @@ class GatewayStreamEngine:
                         code = test_msg.get("code")
                         if code == 4004:
                             C.err("auth", "fatal gateway authentication failure (code 4004: invalid token)")
-                            C.err("auth", "please use Option 3 in the menu to update your token.")
+                            C.err("auth", f"please use '{CREDENTIALS_MENU}' in the menu to update your token.")
                             self.running = False
                             return False
                     elif isinstance(test_msg, dict) and test_msg.get("op") == 0 and test_msg.get("t") == "READY":
@@ -2528,7 +2557,7 @@ class GatewayStreamEngine:
                     self.console.warn("gateway", f"gateway closed connection (code {code}: {reason})")
                     if code == 4004:
                         self.console.err("auth", "fatal: gateway authentication failed (code 4004: invalid token)")
-                        self.console.err("auth", "please use Option 3 in the menu to update your token.")
+                        self.console.err("auth", f"please use '{CREDENTIALS_MENU}' in the menu to update your token.")
                         self.running = False
                         break
                     elif code in (4010, 4011, 4012, 4013, 4014):
@@ -2968,6 +2997,16 @@ def _github_request(url: str, data: dict | None = None, token: str = "",
         return status, {}
 
 
+def can_open_browser() -> bool:
+    if os.name != "nt" and sys.platform != "darwin" and not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return False
+    try:
+        browser = webbrowser.get()
+    except webbrowser.Error:
+        return False
+    return bool(os.environ.get("BROWSER")) or not isinstance(browser, webbrowser.GenericBrowser)
+
+
 def github_device_login(T: "TerminalInterface") -> str:
     if GITHUB_CLIENT_ID.startswith("PASTE"):
         T.failure("github", "GITHUB_CLIENT_ID is not set in BadgeMaxxer.py (create an OAuth App with Device Flow enabled).")
@@ -2979,10 +3018,11 @@ def github_device_login(T: "TerminalInterface") -> str:
         return ""
     url = d.get("verification_uri", "https://github.com/login/device")
     T.log(f"Open {T.COLOR_PRIMARY}{url}{T.COLOR_TEXT} and enter the code {T.COLOR_PRIMARY}{d['user_code']}{T.COLOR_TEXT}")
-    try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+    if can_open_browser():
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
     T.log("waiting for you to approve in the browser...")
     interval = int(d.get("interval", 5))
     deadline = time.time() + int(d.get("expires_in", 900))
@@ -3101,6 +3141,7 @@ class ApplicationController:
 
         if not self._star_gate():
             self.terminal.failure("star", "Star the repo and follow ItzMeShadow999 to use BadgeMaxxer.")
+            self._pause("exit")
             return
 
         if not self.state.token:
@@ -3110,6 +3151,7 @@ class ApplicationController:
 
         if not self.state.token:
             self.terminal.failure("token", "Account token is required.")
+            self._pause("exit")
             return
 
         if not self.state.cookie:
@@ -3119,12 +3161,14 @@ class ApplicationController:
 
         if not self.state.cookie:
             self.terminal.failure("cookie", "cf_clearance cookie is required.")
+            self._pause("exit")
             return
 
         self.terminal.log("loading detectable games catalog...")
         self.catalog = load_game_catalog()
         if not self.catalog:
             self.terminal.failure("catalog", "Unable to retrieve detectable games catalog.")
+            self._pause("exit")
             return
         self.terminal.success("catalog", f"{len(self.catalog)} verified titles loaded")
 
@@ -3137,8 +3181,10 @@ class ApplicationController:
             synchronize_credentials(self.state, self.runtime_context.encoded_properties)
         except Exception as exc:
             self.terminal.failure("auth", str(exc))
-            return
-        self.terminal.success("auth", "Ingestion pipeline initialized")
+            self.terminal.warning("auth", f"Opening the menu anyway, use '{CREDENTIALS_MENU}' to fix your token or cookie.")
+            self._pause("continue")
+        else:
+            self.terminal.success("auth", "Ingestion pipeline initialized")
 
         time.sleep(0.5)
         self.render_main_menu()
@@ -3201,6 +3247,11 @@ class ApplicationController:
 
     def _reconfigure_credentials(self) -> None:
         T = self.terminal
+        old_id = extract_account_snowflake(self.state.token)
+        if arrow_menu("Token", ["Keep current token", "Enter a new token"]) == 1:
+            self._prompt_account_token()
+            if self.state.fingerprint and extract_account_snowflake(self.state.token) != old_id:
+                T.warning("fingerprint", "This token is another account, run 'Configure Executable Fingerprint' again.")
         sel = arrow_menu("Cookie", ["Keep current cookie", "Auto fetch cookies", "Paste your cookie"])
         if sel in (1, 2):
             self._choose_cookie(sel - 1)
@@ -3211,6 +3262,7 @@ class ApplicationController:
             synchronize_credentials(self.state, self.runtime_context.encoded_properties)
         except Exception as exc:
             T.failure("auth", str(exc))
+            self._pause()
             return
         self._renew_session()
         self.state.persist()
@@ -3219,7 +3271,7 @@ class ApplicationController:
 
     def _ensure_runtime_readiness(self) -> bool:
         if not self.state.cookie:
-            self.terminal.failure("cookie", "Missing cookie. Use Option 3 to configure.")
+            self.terminal.failure("cookie", f"Missing cookie. Use '{CREDENTIALS_MENU}' in the menu to configure.")
             return False
         if self.state.requires_refresh:
             try:
@@ -3230,10 +3282,10 @@ class ApplicationController:
             self._renew_session()
         return bool(self.state.analytics_token)
 
-    def _pause(self) -> None:
+    def _pause(self, action: str = "return to menu") -> None:
         T = self.terminal
         T.separator()
-        input(f"  {T.COLOR_PRIMARY}›{T.COLOR_RESET} Press enter to return to menu")
+        input(f"  {T.COLOR_PRIMARY}›{T.COLOR_RESET} Press enter to {action}")
 
     def _ask_hours(self, label: str, default: float, allow_zero: bool = False) -> float | None:
         T = self.terminal
@@ -3430,11 +3482,11 @@ class ApplicationController:
         account_id = extract_account_snowflake(self.state.token)
         if not account_id:
             T.failure("fingerprint", "Valid token required to derive user identity.")
-            time.sleep(1)
+            self._pause()
             return
         if os.name != "nt":
             T.failure("fingerprint", "Fingerprint generation requires Windows OS.")
-            time.sleep(1)
+            self._pause()
             return
 
         T.log("Generate executable fingerprint bound to account and machine.")
@@ -3450,7 +3502,7 @@ class ApplicationController:
         target_path = "" if target_pid else raw_input
         if target_path and not Path(target_path).exists():
             T.failure("fingerprint", f"File path does not exist: {target_path}")
-            time.sleep(1.5)
+            self._pause()
             return
 
         T.log("Generating signature via PowerShell PE analyzer...")
@@ -3458,7 +3510,7 @@ class ApplicationController:
             signature = build_binary_signature(account_id, file_path=target_path, active_pid=target_pid)
         except Exception as exc:
             T.failure("fingerprint", str(exc))
-            time.sleep(2)
+            self._pause()
             return
 
         self.state.fingerprint = signature
@@ -3538,8 +3590,8 @@ class ApplicationController:
         props = self.runtime_context.encoded_properties
         st, me = _discord_api_get("https://discord.com/api/v9/users/@me", self.state.token, props)
         if st == 401:
-            C.err("auth", "your token was rejected (HTTP 401), update it with 'Refresh Credentials & Cookie'")
-            time.sleep(1.5)
+            C.err("auth", f"your token was rejected (HTTP 401), update it with '{CREDENTIALS_MENU}'")
+            self._pause()
             return None
         if st == 200:
             C.ok("account", f"signed in as {me.get('global_name') or me.get('username')} ({me.get('id')})")
@@ -3734,7 +3786,7 @@ class ApplicationController:
             "Streaming",
             "Start Watcher",
             "Inspect Discord Profile & Badges",
-            "Refresh Credentials & Cookie",
+            CREDENTIALS_MENU,
             "Configure Executable Fingerprint",
             "Exit",
         ]
@@ -3751,6 +3803,7 @@ class ApplicationController:
                 break
             if not self._star_gate(quiet=True):
                 T.failure("star", "Star check failed, BadgeMaxxer is stopping.")
+                self._pause("exit")
                 break
             if choice == 0:
                 self.level_up_all()
@@ -3776,6 +3829,10 @@ def execute_entrypoint() -> None:
     except KeyboardInterrupt:
         print()
         TerminalInterface().warning("exit", "Execution halted by user.")
+    except EOFError:
+        print()
+        TerminalInterface().warning("exit", "No interactive terminal (stdin closed). Run BadgeMaxxer from a terminal window.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
