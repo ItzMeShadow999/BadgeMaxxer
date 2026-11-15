@@ -31,6 +31,9 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+SYSTEM_PYTHON_POSIX = os.name != "nt" and sys.prefix == sys.base_prefix
+
+
 def _install_package(name: str) -> bool:
     try:
         result = subprocess.run(
@@ -58,6 +61,8 @@ if not HAS_CRYPTO:
         importlib.invalidate_caches()
         HAS_CRYPTO = _load_crypto()
     print("cryptography installed." if HAS_CRYPTO else "cryptography could not be installed, continuing without encrypted audio frames.")
+    if not HAS_CRYPTO and SYSTEM_PYTHON_POSIX:
+        print("On Linux, use install.sh to set up the packages in a virtual environment.")
 
 WORKSPACE_DIR = Path(__file__).resolve().parent
 STATE_STORAGE_PATH = WORKSPACE_DIR / "session.json"
@@ -2820,7 +2825,8 @@ class GatewayStreamEngine:
             if HAS_CRYPTO and self.voice_conn and self.voice_conn.secret_key:
                 C.ok("audio", "encrypted silence pump active (cryptography lib found)")
             else:
-                C.info(f"{C.GREY}tip: pip install cryptography (enables encrypted audio frames){C.RESET}")
+                tip = "use install.sh" if SYSTEM_PYTHON_POSIX else "pip install cryptography"
+                C.info(f"{C.GREY}tip: {tip} (enables encrypted audio frames){C.RESET}")
 
         elif event_type == "STREAM_SERVER_UPDATE":
             token = d.get("token", "")
@@ -3694,7 +3700,8 @@ class ApplicationController:
             if importlib.util.find_spec(package) is None:
                 C.info(f"installing {package} for the watcher ...")
                 if not _install_package(package):
-                    C.err("watcher", f"could not install {package}, run: pip install {package}")
+                    hint = "use install.sh to set it up in a virtual environment" if SYSTEM_PYTHON_POSIX else f"run: pip install {package}"
+                    C.err("watcher", f"could not install {package}, {hint}")
                     return None
                 importlib.invalidate_caches()
         cmd = [sys.executable, str(WATCHER_SCRIPT), target]
