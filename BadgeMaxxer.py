@@ -1086,16 +1086,12 @@ def parse_catalog_entries(raw_json: str) -> list[DetectableTitle]:
 
 
 def load_game_catalog() -> list[DetectableTitle]:
-    cached_content = ""
-    if DATABASE_STORAGE_PATH.exists():
-        cached_content = DATABASE_STORAGE_PATH.read_text(encoding="utf-8").strip()
-    if cached_content:
-        try:
-            titles = parse_catalog_entries(cached_content)
-            if titles:
-                return titles
-        except (json.JSONDecodeError, ValueError):
-            pass
+    try:
+        titles = parse_catalog_entries(DATABASE_STORAGE_PATH.read_text(encoding="utf-8"))
+        if titles:
+            return titles
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
     try:
         return parse_catalog_entries(fetch_remote_catalog())
     except Exception:
