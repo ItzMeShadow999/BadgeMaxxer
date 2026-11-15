@@ -2783,6 +2783,7 @@ class GatewayStreamEngine:
 
 
 STAR_REPO = "ItzMeShadow999/BadgeMaxxer"
+FOLLOW_USER = "ItzMeShadow999"
 
 
 GITHUB_CLIENT_ID = "Ov23liu4TVIYMEPe5ArO"
@@ -2875,6 +2876,21 @@ def check_star(token: str) -> tuple[bool | None, int]:
     return None, st
 
 
+def check_follow(token: str) -> tuple[bool | None, str, int]:
+    st, me = _github_request("https://api.github.com/user", token=token)
+    login = me.get("login", "") if isinstance(me, dict) else ""
+    if st != 200 or not login:
+        return None, "", st
+    if login.lower() == FOLLOW_USER.lower():
+        return True, login, 204
+    st, _ = _github_request(f"https://api.github.com/users/{login}/following/{FOLLOW_USER}", token=token)
+    if st == 204:
+        return True, login, st
+    if st == 404:
+        return False, login, st
+    return None, login, st
+
+
 class ApplicationController:
     def __init__(self) -> None:
         self.terminal = TerminalInterface()
@@ -2915,8 +2931,19 @@ class ApplicationController:
         if not starred:
             T.failure("star", f"you have not starred {STAR_REPO}. Star it, then run BadgeMaxxer again.")
             return False
+        followed, login, fst = check_follow(token)
+        if followed is None:
+            T.failure("follow", f"could not verify your follow ({STAR_ERROR or fst}). BadgeMaxxer needs this check to run.")
+            return False
+        if not followed:
+            T.failure("follow", f"you are not following {FOLLOW_USER}. Follow https://github.com/{FOLLOW_USER}, then run BadgeMaxxer again.")
+            return False
+        if login and login != self.state.github_user:
+            self.state.github_user = login
+            self.state.persist()
         if not quiet:
             T.success("star", "verified, thanks for the star")
+            T.success("follow", f"verified, thanks for following {FOLLOW_USER}")
         return True
 
     def start(self) -> None:
@@ -2925,7 +2952,7 @@ class ApplicationController:
         time.sleep(0.3)
 
         if not self._star_gate():
-            self.terminal.failure("star", "Star the repo to use BadgeMaxxer.")
+            self.terminal.failure("star", "Star the repo and follow ItzMeShadow999 to use BadgeMaxxer.")
             return
 
         if not self.state.token:
