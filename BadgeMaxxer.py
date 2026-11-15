@@ -3128,7 +3128,7 @@ class ApplicationController:
             return
         self.terminal.success("catalog", f"{len(self.catalog)} verified titles loaded")
 
-        if not self.state.fingerprint:
+        if not self.state.fingerprint and os.name == "nt":
             self.terminal.warning("fingerprint", "Executable fingerprint not set (optional for hours, recommended for variety).")
 
         self.terminal.log("synchronizing analytics credentials...")
