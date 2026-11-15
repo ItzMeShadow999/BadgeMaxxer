@@ -889,6 +889,8 @@ class AccountSessionState:
                 existing = json.loads(STATE_STORAGE_PATH.read_text(encoding="utf-8"))
             except Exception:
                 pass
+        if not isinstance(existing, dict):
+            existing = {}
         existing.update(asdict(self))
         if os.name == "nt":
             STATE_STORAGE_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
