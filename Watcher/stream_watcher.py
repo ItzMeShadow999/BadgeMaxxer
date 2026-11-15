@@ -142,7 +142,10 @@ class DebugLog:
     def open(self, path):
         self.path = os.path.abspath(path)
         try:
-            self.fh = open(self.path, "w", encoding="utf-8")
+            fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            self.fh = os.fdopen(fd, "w", encoding="utf-8")
+            if os.name != "nt":
+                os.fchmod(fd, 0o600)
         except OSError:
             self.fh = None
         self.write("env", f"python {platform.python_version()} on {platform.platform()}, "
@@ -1154,6 +1157,8 @@ if __name__ == "__main__":
         asyncio.run(main(parse_args()))
     except KeyboardInterrupt:
         log("Stopped.")
+    except EOFError:
+        log("No interactive terminal (stdin closed). Run the watcher from a terminal window.")
     except Exception as exc:
         log(f"Error: {exc!r}")
         DBG.write("trace", traceback.format_exc())
