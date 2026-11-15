@@ -7,6 +7,7 @@ import codecs
 import importlib
 import importlib.util
 import json
+import math
 import os
 import random
 import re
@@ -3297,7 +3298,7 @@ class ApplicationController:
         except ValueError:
             T.failure("input", f"Invalid hours specified: {raw}")
             return None
-        if value < 0 or (value == 0 and not allow_zero):
+        if not math.isfinite(value) or value < 0 or (value == 0 and not allow_zero):
             T.failure("input", "Hours must be greater than 0.")
             return None
         return value
