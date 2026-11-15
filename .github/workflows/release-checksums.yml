@@ -25,4 +25,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.release.tag_name }}
-        run: gh release upload "$TAG" SHA256SUMS install.ps1 --clobber
+        run: gh release upload "$TAG" SHA256SUMS install.ps1 install.sh --clobber
