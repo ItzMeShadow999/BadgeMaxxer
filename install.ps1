@@ -63,7 +63,7 @@ function Install-BadgeMaxxer {
     $py = Find-Python
     if (-not $py -and (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Step "Python 3 not found, installing it with winget ..."
-        winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements | Out-Null
+        winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements
         $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
         $py = Find-Python
     }
