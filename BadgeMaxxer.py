@@ -565,6 +565,22 @@ class PosixWatcherProcess:
             self.terminal.terminate()
 
 
+def copy_to_clipboard_posix(text: str) -> bool:
+    commands = []
+    if os.environ.get("WAYLAND_DISPLAY"):
+        commands.append(["wl-copy"])
+    if os.environ.get("DISPLAY"):
+        commands += [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+    for cmd in commands:
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(cmd, input=text.encode("utf-8"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=5)
+                return True
+            except Exception:
+                continue
+    return False
+
+
 def read_key() -> str:
     if os.name == "nt":
         import msvcrt
@@ -3129,6 +3145,10 @@ class ApplicationController:
                 if os.name == "nt":
                     subprocess.run(["clip"], input=TOKEN_SNIPPET.encode("ascii"), check=True)
                     T.log("Copied to clipboard.")
+                elif copy_to_clipboard_posix(TOKEN_SNIPPET):
+                    T.log("Copied to clipboard.")
+                else:
+                    T.log("Copy the snippet above manually.")
             except Exception:
                 pass
             T.log("Open Discord (web or desktop), press Ctrl+Shift+I, open Console, paste, press Enter.")
