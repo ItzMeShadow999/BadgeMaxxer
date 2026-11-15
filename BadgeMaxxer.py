@@ -646,7 +646,7 @@ def arrow_menu(title: str, options: Sequence[str], hint: str = "↑/↓ move · 
         for i, opt in enumerate(options, 1):
             print(f"    {i}. {opt}")
         raw = input("  › ").strip()
-        return int(raw) - 1 if raw.isdigit() and 1 <= int(raw) <= n else None
+        return int(raw) - 1 if raw.isdecimal() and 1 <= int(raw) <= n else None
 
     sel = start if 0 <= start < n else 0
     view = min(n, menu_capacity())
@@ -3319,7 +3319,7 @@ class ApplicationController:
 
         def custom_games() -> int | None:
             raw = input(f"  {T.COLOR_MUTED}Games count (1-{total}):{T.COLOR_RESET} ").strip()
-            if not raw.isdigit() or int(raw) < 1:
+            if not raw.isdecimal() or int(raw) < 1:
                 T.failure("input", "Game count must be a whole number of at least 1.")
                 return None
             return min(int(raw), total)
@@ -3499,7 +3499,7 @@ class ApplicationController:
             time.sleep(1)
             return
 
-        target_pid = int(raw_input) if raw_input.isdigit() else 0
+        target_pid = int(raw_input) if raw_input.isdecimal() else 0
         target_path = "" if target_pid else raw_input
         if target_path and not Path(target_path).exists():
             T.failure("fingerprint", f"File path does not exist: {target_path}")
