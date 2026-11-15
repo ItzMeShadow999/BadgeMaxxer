@@ -12,6 +12,7 @@ import random
 import re
 import select
 import shutil
+import signal
 import socket
 import ssl
 import struct
@@ -2147,6 +2148,10 @@ class GatewayStreamEngine:
         if deadline:
             C.info(f"{C.GREY}auto stop after {max_seconds / 3600.0:g}h{C.RESET}")
         C.rule()
+        if os.name != "nt" and sys.stdin.isatty():
+            self._wait_for_enter_posix(deadline)
+            self._cleanup(guild_id)
+            return
         try:
             import msvcrt
             while self.running:
@@ -2166,6 +2171,35 @@ class GatewayStreamEngine:
                 time.sleep(0.5)
 
         self._cleanup(guild_id)
+
+    def _wait_for_enter_posix(self, deadline: float) -> None:
+        C = self.console
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+
+        def restore_and_exit(signum, frame):
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            signal.signal(signum, previous[signum])
+            os.kill(os.getpid(), signum)
+        previous = {sig: signal.signal(sig, restore_and_exit) for sig in (signal.SIGTERM, signal.SIGHUP)}
+        try:
+            tty.setcbreak(fd)
+            while self.running:
+                if select.select([fd], [], [], 0.1)[0]:
+                    key = os.read(fd, 1)
+                    if not key or key in (b"\r", b"\n"):
+                        break
+                if deadline and time.time() >= deadline:
+                    C.info("requested stream time reached, stopping...")
+                    break
+        except KeyboardInterrupt:
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
 
     def _status_display(self) -> None:
         while self.running:
