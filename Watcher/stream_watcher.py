@@ -128,7 +128,7 @@ VOICE_CLOSE_CODES = {
 
 MODES = ("aead_xchacha20_poly1305_rtpsize", "aead_aes256_gcm_rtpsize")
 SECRET_KEYS = {"token", "secret_key"}
-QUIET_EVENTS = {"READY", "GUILD_CREATE", "READY_SUPPLEMENTAL", "SESSIONS_REPLACE"}
+LOGGED_EVENTS = {"RESUMED", "VOICE_STATE_UPDATE", "VOICE_SERVER_UPDATE", "STREAM_CREATE", "STREAM_SERVER_UPDATE", "STREAM_DELETE"}
 
 
 class DebugLog:
@@ -796,10 +796,10 @@ class StreamWatcher:
 
 
     async def dispatch(self, name, d):
-        if name in QUIET_EVENTS:
-            DBG.write("gateway", f"< {name} (omitted)")
-        else:
+        if name in LOGGED_EVENTS:
             DBG.frame("gateway", "<", {"t": name, "d": d})
+        else:
+            DBG.write("gateway", f"< {name} (omitted)")
 
         if name == "READY":
             first = self.ready_count == 0
