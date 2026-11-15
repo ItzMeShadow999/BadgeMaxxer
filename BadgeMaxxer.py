@@ -1456,10 +1456,13 @@ class MiniWebSocket:
             return {"op": "close", "code": code, "reason": reason}
         if opcode == 0x9:
             try:
+                data = self._read_payload(head)
                 with self._lock:
                     if self.sock and not self.closed:
-                        pong = bytearray([0x8A, 0x80])
-                        pong.extend(os.urandom(4))
+                        mask = os.urandom(4)
+                        pong = bytearray([0x8A, 0x80 | len(data)])
+                        pong.extend(mask)
+                        pong.extend(b ^ mask[i % 4] for i, b in enumerate(data))
                         self.sock.sendall(pong)
             except Exception:
                 self.close()
