@@ -8,9 +8,9 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/python-3.9%2B-EDCB40?style=for-the-badge&logo=python&logoColor=white&labelColor=1a1a1a" alt="Python 3.9+" />
-  <img src="https://img.shields.io/badge/platform-Windows-EDCB40?style=for-the-badge&logo=windows&logoColor=white&labelColor=1a1a1a" alt="Windows" />
-  <img src="https://img.shields.io/badge/dependencies-stdlib%20only-C9A40E?style=for-the-badge&labelColor=1a1a1a" alt="stdlib only" />
-  <img src="https://img.shields.io/badge/single%20file-badgemaxxer.py-C9A40E?style=for-the-badge&logo=files&logoColor=white&labelColor=1a1a1a" alt="Single file" />
+  <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux-EDCB40?style=for-the-badge&labelColor=1a1a1a" alt="Windows | Linux" />
+  <img src="https://img.shields.io/badge/dependencies-cryptography%20%7C%20websockets%20%7C%20davey-C9A40E?style=for-the-badge&labelColor=1a1a1a" alt="cryptography | websockets | davey" />
+  <img src="https://img.shields.io/badge/single%20file-BadgeMaxxer.py-C9A40E?style=for-the-badge&logo=files&logoColor=white&labelColor=1a1a1a" alt="Single file" />
   <a href="https://github.com/ItzMeShadow999/BadgeMaxxer/stargazers">
     <img src="https://img.shields.io/github/stars/ItzMeShadow999/BadgeMaxxer?style=for-the-badge&logo=github&logoColor=white&color=EDCB40&labelColor=1a1a1a" alt="GitHub stars" />
   </a>
@@ -42,7 +42,8 @@
 ## Requirements
 
 - Python 3.9 or newer
-- Windows (fingerprint option and Enter-to-stop use Windows APIs)
+- Windows or Linux (the fingerprint option is Windows only)
+- On Linux: `curl` or `wget`, and Python with `venv` (on Debian and Ubuntu: `python3-venv`). `wl-copy`, `xclip` or `xsel` are optional, for copying the token snippet.
 - `cryptography` for encrypted silence frames while streaming. It is installed automatically on first run if missing.
 
 ## Quick run
@@ -54,6 +55,14 @@ irm https://github.com/ItzMeShadow999/BadgeMaxxer/releases/latest/download/insta
 ```
 
 This downloads BadgeMaxxer and the Watcher into `%USERPROFILE%\BadgeMaxxer`, installs the Python packages, and starts it. Your `session.json` is never overwritten.
+
+Linux:
+
+```sh
+curl -fsSL https://github.com/ItzMeShadow999/BadgeMaxxer/releases/latest/download/install.sh | sh
+```
+
+This downloads BadgeMaxxer and the Watcher into `~/BadgeMaxxer`, installs the Python packages into a virtual environment at `~/BadgeMaxxer/.venv`, and starts it. Your `session.json` is never overwritten. The Watcher opens in your desktop's terminal, set `TERMINAL` to use another one.
 
 ### Verified installs
 
@@ -68,10 +77,24 @@ notepad install.ps1
 .\install.ps1
 ```
 
+On Linux:
+
+```sh
+curl -fsSLO https://github.com/ItzMeShadow999/BadgeMaxxer/releases/download/v1.2.1/install.sh
+less install.sh
+BADGEMAXXER_TAG=v1.2.1 sh install.sh
+```
+
 ## Usage
 
 ```bash
-python badgemaxxer.py
+python BadgeMaxxer.py
+```
+
+On Linux, run it with the Python from the installer's virtual environment:
+
+```sh
+~/BadgeMaxxer/.venv/bin/python ~/BadgeMaxxer/BadgeMaxxer.py
 ```
 
 On first run it asks for your account token and a `cf_clearance` cookie, then saves them to `session.json` next to the script. Use **Refresh Credentials & Cookie** in the menu to update them later.
@@ -98,7 +121,7 @@ For stream time to count:
 
 | File | Purpose |
 |---|---|
-| `badgemaxxer.py` | The whole tool |
+| `BadgeMaxxer.py` | The whole tool |
 | `session.json` | Token, cookie, fingerprint and totals (created on first run) |
 | `../data/games.json` | Cached games catalog from `cdn.discordapp.com/detectables/games.json`. Delete it to refresh. |
 

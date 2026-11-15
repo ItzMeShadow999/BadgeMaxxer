@@ -11,7 +11,9 @@ import os
 import random
 import re
 import select
+import shlex
 import shutil
+import signal
 import socket
 import ssl
 import struct
@@ -28,6 +30,9 @@ import webbrowser
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Sequence
+
+SYSTEM_PYTHON_POSIX = os.name != "nt" and sys.prefix == sys.base_prefix
+
 
 def _install_package(name: str) -> bool:
     try:
@@ -56,6 +61,8 @@ if not HAS_CRYPTO:
         importlib.invalidate_caches()
         HAS_CRYPTO = _load_crypto()
     print("cryptography installed." if HAS_CRYPTO else "cryptography could not be installed, continuing without encrypted audio frames.")
+    if not HAS_CRYPTO and SYSTEM_PYTHON_POSIX:
+        print("On Linux, use install.sh to set up the packages in a virtual environment.")
 
 WORKSPACE_DIR = Path(__file__).resolve().parent
 STATE_STORAGE_PATH = WORKSPACE_DIR / "session.json"
@@ -478,6 +485,107 @@ def force_black_console() -> None:
         pass
 
 
+POSIX_TERMINALS = {
+    "x-terminal-emulator": ["-e"],
+    "gnome-terminal": ["--"],
+    "ptyxis": ["--"],
+    "kgx": ["--"],
+    "konsole": ["-e"],
+    "xfce4-terminal": ["-x"],
+    "mate-terminal": ["-x"],
+    "lxterminal": ["-e"],
+    "qterminal": ["-e"],
+    "terminator": ["-x"],
+    "kitty": [],
+    "alacritty": ["-e"],
+    "foot": [],
+    "wezterm": ["start", "--"],
+    "ghostty": ["-e"],
+    "xterm": ["-e"],
+}
+DESKTOP_TERMINALS = {
+    "KDE": ["konsole"],
+    "GNOME": ["ptyxis", "kgx", "gnome-terminal"],
+    "XFCE": ["xfce4-terminal"],
+    "MATE": ["mate-terminal"],
+    "LXQT": ["qterminal"],
+    "LXDE": ["lxterminal"],
+    "X-CINNAMON": ["gnome-terminal"],
+}
+
+
+def find_terminal_posix() -> list[str] | None:
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return None
+    candidates = list(POSIX_TERMINALS.items())
+    for desktop in reversed(os.environ.get("XDG_CURRENT_DESKTOP", "").upper().split(":")):
+        for name in reversed(DESKTOP_TERMINALS.get(desktop, [])):
+            candidates.insert(0, (name, POSIX_TERMINALS[name]))
+    preferred = shlex.split(os.environ.get("TERMINAL", ""))
+    if preferred:
+        name, extra = preferred[0], preferred[1:]
+        candidates.insert(0, (name, extra or POSIX_TERMINALS.get(os.path.basename(name), ["-e"])))
+    for name, args in candidates:
+        path = shutil.which(name)
+        if path:
+            return [path, *args]
+    return None
+
+
+class PosixWatcherProcess:
+    def __init__(self, terminal: subprocess.Popen, cmd: list[str]) -> None:
+        self.terminal = terminal
+        self.cmdline = "\0".join(cmd)
+        self.started = time.time()
+
+    def _watcher_pids(self) -> list[int]:
+        pids = []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return pids
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                    if fh.read().decode("utf-8", "ignore").rstrip("\0") == self.cmdline:
+                        pids.append(int(entry))
+            except OSError:
+                pass
+        return pids
+
+    def poll(self) -> int | None:
+        if self.terminal.poll() is None or self._watcher_pids() or time.time() - self.started < 15:
+            return None
+        return self.terminal.poll()
+
+    def terminate(self) -> None:
+        for pid in self._watcher_pids():
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        if self.terminal.poll() is None:
+            self.terminal.terminate()
+
+
+def copy_to_clipboard_posix(text: str) -> bool:
+    commands = []
+    if os.environ.get("WAYLAND_DISPLAY"):
+        commands.append(["wl-copy"])
+    if os.environ.get("DISPLAY"):
+        commands += [["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]]
+    for cmd in commands:
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(cmd, input=text.encode("utf-8"), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=5)
+                return True
+            except Exception:
+                continue
+    return False
+
+
 def read_key() -> str:
     if os.name == "nt":
         import msvcrt
@@ -752,7 +860,13 @@ class AccountSessionState:
             except Exception:
                 pass
         existing.update(asdict(self))
-        STATE_STORAGE_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        if os.name == "nt":
+            STATE_STORAGE_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
+        else:
+            fd = os.open(STATE_STORAGE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                os.fchmod(fh.fileno(), 0o600)
+                fh.write(json.dumps(existing, indent=2))
 
     def save(self) -> None:
         self.persist()
@@ -2147,6 +2261,10 @@ class GatewayStreamEngine:
         if deadline:
             C.info(f"{C.GREY}auto stop after {max_seconds / 3600.0:g}h{C.RESET}")
         C.rule()
+        if os.name != "nt" and sys.stdin.isatty():
+            self._wait_for_enter_posix(deadline)
+            self._cleanup(guild_id)
+            return
         try:
             import msvcrt
             while self.running:
@@ -2166,6 +2284,35 @@ class GatewayStreamEngine:
                 time.sleep(0.5)
 
         self._cleanup(guild_id)
+
+    def _wait_for_enter_posix(self, deadline: float) -> None:
+        C = self.console
+        import termios
+        import tty
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+
+        def restore_and_exit(signum, frame):
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            signal.signal(signum, previous[signum])
+            os.kill(os.getpid(), signum)
+        previous = {sig: signal.signal(sig, restore_and_exit) for sig in (signal.SIGTERM, signal.SIGHUP)}
+        try:
+            tty.setcbreak(fd)
+            while self.running:
+                if select.select([fd], [], [], 0.1)[0]:
+                    key = os.read(fd, 1)
+                    if not key or key in (b"\r", b"\n"):
+                        break
+                if deadline and time.time() >= deadline:
+                    C.info("requested stream time reached, stopping...")
+                    break
+        except KeyboardInterrupt:
+            pass
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+            for sig, handler in previous.items():
+                signal.signal(sig, handler)
 
     def _status_display(self) -> None:
         while self.running:
@@ -2678,7 +2825,8 @@ class GatewayStreamEngine:
             if HAS_CRYPTO and self.voice_conn and self.voice_conn.secret_key:
                 C.ok("audio", "encrypted silence pump active (cryptography lib found)")
             else:
-                C.info(f"{C.GREY}tip: pip install cryptography (enables encrypted audio frames){C.RESET}")
+                tip = "use install.sh" if SYSTEM_PYTHON_POSIX else "pip install cryptography"
+                C.info(f"{C.GREY}tip: {tip} (enables encrypted audio frames){C.RESET}")
 
         elif event_type == "STREAM_SERVER_UPDATE":
             token = d.get("token", "")
@@ -2980,7 +3128,7 @@ class ApplicationController:
             return
         self.terminal.success("catalog", f"{len(self.catalog)} verified titles loaded")
 
-        if not self.state.fingerprint:
+        if not self.state.fingerprint and os.name == "nt":
             self.terminal.warning("fingerprint", "Executable fingerprint not set (optional for hours, recommended for variety).")
 
         self.terminal.log("synchronizing analytics credentials...")
@@ -3009,6 +3157,10 @@ class ApplicationController:
                 if os.name == "nt":
                     subprocess.run(["clip"], input=TOKEN_SNIPPET.encode("ascii"), check=True)
                     T.log("Copied to clipboard.")
+                elif copy_to_clipboard_posix(TOKEN_SNIPPET):
+                    T.log("Copied to clipboard.")
+                else:
+                    T.log("Copy the snippet above manually.")
             except Exception:
                 pass
             T.log("Open Discord (web or desktop), press Ctrl+Shift+I, open Console, paste, press Enter.")
@@ -3538,20 +3690,29 @@ class ApplicationController:
         if not target:
             C.err("watcher", "could not read this account's id from the token")
             return None
+        terminal = None
         if os.name != "nt":
-            C.warn("watcher", f"run it in another terminal: python \"{WATCHER_SCRIPT}\" {target}")
-            return None
+            terminal = find_terminal_posix()
+            if not terminal:
+                C.warn("watcher", f"run it in another terminal: \"{sys.executable}\" \"{WATCHER_SCRIPT}\" {target}")
+                return None
         for package in WATCHER_PACKAGES:
             if importlib.util.find_spec(package) is None:
                 C.info(f"installing {package} for the watcher ...")
                 if not _install_package(package):
-                    C.err("watcher", f"could not install {package}, run: pip install {package}")
+                    hint = "use install.sh to set it up in a virtual environment" if SYSTEM_PYTHON_POSIX else f"run: pip install {package}"
+                    C.err("watcher", f"could not install {package}, {hint}")
                     return None
                 importlib.invalidate_caches()
         cmd = [sys.executable, str(WATCHER_SCRIPT), target]
         if guild_id and channel_id:
             cmd += ["--guild", guild_id, "--channel", channel_id]
-        proc = subprocess.Popen(cmd, cwd=str(WATCHER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
+        if os.name == "nt":
+            proc = subprocess.Popen(cmd, cwd=str(WATCHER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
+        else:
+            launcher = ["sh", "-c", 'cd "$0" && exec "$@"', str(WATCHER_DIR)]
+            window = subprocess.Popen(terminal + launcher + cmd, cwd=str(WATCHER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = PosixWatcherProcess(window, cmd)
         C.ok("watcher", "opened in a new window, it asks for your MAIN account token there once (hidden, saved to Watcher/watcher_session.json)")
         return proc
 
