@@ -760,10 +760,12 @@ class StreamWatcher:
                         await ws.send(json.dumps({"op": 1, "d": self.seq}))
                     elif op == 7:
                         log("Gateway asked for a reconnect.")
+                        await ws.close(code=4000)
                         return "reconnect requested"
                     elif op == 9:
                         if not msg.get("d"):
                             self.session_id = self.seq = self.resume_url = None
+                        await ws.close(code=4000)
                         await asyncio.sleep(1 + random.random() * 4)
                         return "invalid session"
                     elif op == 0:
