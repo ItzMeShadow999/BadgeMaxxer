@@ -11,6 +11,7 @@ import os
 import random
 import re
 import select
+import shlex
 import shutil
 import signal
 import socket
@@ -477,6 +478,91 @@ def force_black_console() -> None:
         kernel.SetConsoleScreenBufferInfoEx(handle, ctypes.byref(info))
     except Exception:
         pass
+
+
+POSIX_TERMINALS = {
+    "x-terminal-emulator": ["-e"],
+    "gnome-terminal": ["--"],
+    "ptyxis": ["--"],
+    "kgx": ["--"],
+    "konsole": ["-e"],
+    "xfce4-terminal": ["-x"],
+    "mate-terminal": ["-x"],
+    "lxterminal": ["-e"],
+    "qterminal": ["-e"],
+    "terminator": ["-x"],
+    "kitty": [],
+    "alacritty": ["-e"],
+    "foot": [],
+    "wezterm": ["start", "--"],
+    "ghostty": ["-e"],
+    "xterm": ["-e"],
+}
+DESKTOP_TERMINALS = {
+    "KDE": ["konsole"],
+    "GNOME": ["ptyxis", "kgx", "gnome-terminal"],
+    "XFCE": ["xfce4-terminal"],
+    "MATE": ["mate-terminal"],
+    "LXQT": ["qterminal"],
+    "LXDE": ["lxterminal"],
+    "X-CINNAMON": ["gnome-terminal"],
+}
+
+
+def find_terminal_posix() -> list[str] | None:
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return None
+    candidates = list(POSIX_TERMINALS.items())
+    for desktop in reversed(os.environ.get("XDG_CURRENT_DESKTOP", "").upper().split(":")):
+        for name in reversed(DESKTOP_TERMINALS.get(desktop, [])):
+            candidates.insert(0, (name, POSIX_TERMINALS[name]))
+    preferred = shlex.split(os.environ.get("TERMINAL", ""))
+    if preferred:
+        name, extra = preferred[0], preferred[1:]
+        candidates.insert(0, (name, extra or POSIX_TERMINALS.get(os.path.basename(name), ["-e"])))
+    for name, args in candidates:
+        path = shutil.which(name)
+        if path:
+            return [path, *args]
+    return None
+
+
+class PosixWatcherProcess:
+    def __init__(self, terminal: subprocess.Popen, cmd: list[str]) -> None:
+        self.terminal = terminal
+        self.cmdline = "\0".join(cmd)
+        self.started = time.time()
+
+    def _watcher_pids(self) -> list[int]:
+        pids = []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return pids
+        for entry in entries:
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                    if fh.read().decode("utf-8", "ignore").rstrip("\0") == self.cmdline:
+                        pids.append(int(entry))
+            except OSError:
+                pass
+        return pids
+
+    def poll(self) -> int | None:
+        if self.terminal.poll() is None or self._watcher_pids() or time.time() - self.started < 15:
+            return None
+        return self.terminal.poll()
+
+    def terminate(self) -> None:
+        for pid in self._watcher_pids():
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except OSError:
+                pass
+        if self.terminal.poll() is None:
+            self.terminal.terminate()
 
 
 def read_key() -> str:
@@ -3572,9 +3658,12 @@ class ApplicationController:
         if not target:
             C.err("watcher", "could not read this account's id from the token")
             return None
+        terminal = None
         if os.name != "nt":
-            C.warn("watcher", f"run it in another terminal: python \"{WATCHER_SCRIPT}\" {target}")
-            return None
+            terminal = find_terminal_posix()
+            if not terminal:
+                C.warn("watcher", f"run it in another terminal: \"{sys.executable}\" \"{WATCHER_SCRIPT}\" {target}")
+                return None
         for package in WATCHER_PACKAGES:
             if importlib.util.find_spec(package) is None:
                 C.info(f"installing {package} for the watcher ...")
@@ -3585,7 +3674,12 @@ class ApplicationController:
         cmd = [sys.executable, str(WATCHER_SCRIPT), target]
         if guild_id and channel_id:
             cmd += ["--guild", guild_id, "--channel", channel_id]
-        proc = subprocess.Popen(cmd, cwd=str(WATCHER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
+        if os.name == "nt":
+            proc = subprocess.Popen(cmd, cwd=str(WATCHER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
+        else:
+            launcher = ["sh", "-c", 'cd "$0" && exec "$@"', str(WATCHER_DIR)]
+            window = subprocess.Popen(terminal + launcher + cmd, cwd=str(WATCHER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = PosixWatcherProcess(window, cmd)
         C.ok("watcher", "opened in a new window, it asks for your MAIN account token there once (hidden, saved to Watcher/watcher_session.json)")
         return proc
 
