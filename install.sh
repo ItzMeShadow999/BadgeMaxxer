@@ -37,7 +37,7 @@ sha256() {
 
 find_python() {
     for candidate in python3 python; do
-        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" --version 2>&1 | grep -q '^Python 3'; then
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 9))' >/dev/null 2>&1; then
             echo "$candidate"
             return 0
         fi
@@ -80,7 +80,7 @@ install_badgemaxxer() {
     fi
 
     if ! py="$(find_python)"; then
-        bad "Python 3 is required. Install it with your package manager (for example: sudo pacman -S python, or sudo apt install python3 python3-venv), then run this again."
+        bad "Python 3.9 or newer is required. Install it with your package manager (for example: sudo pacman -S python, or sudo apt install python3 python3-venv), then run this again."
         return 1
     fi
 
