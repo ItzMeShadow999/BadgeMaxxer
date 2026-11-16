@@ -3477,8 +3477,7 @@ class ApplicationController:
             chosen = unprocessed
             if processed:
                 needed = desired_amount - len(chosen)
-                rotated = processed[needed:] + processed[:needed]
-                chosen.extend(rotated[:needed])
+                chosen.extend(processed[:needed])
 
         self.state.used_games = [gid for gid in self.state.used_games if gid not in chosen] + chosen
         registry = {item.title_id: item for item in self.catalog}
