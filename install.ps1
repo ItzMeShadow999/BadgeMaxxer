@@ -16,8 +16,8 @@ function Find-Python {
         $pre = @($candidate | Select-Object -Skip 1)
         if (-not (Get-Command $exe -ErrorAction SilentlyContinue)) { continue }
         try {
-            $version = & $exe @pre --version 2>&1
-            if ($LASTEXITCODE -eq 0 -and "$version" -match "Python 3") {
+            & $exe @pre -c "import sys; sys.exit(sys.version_info < (3, 9))" 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
                 return @{ Exe = $exe; Pre = $pre }
             }
         } catch { }
@@ -62,13 +62,13 @@ function Install-BadgeMaxxer {
 
     $py = Find-Python
     if (-not $py -and (Get-Command winget -ErrorAction SilentlyContinue)) {
-        Write-Step "Python 3 not found, installing it with winget ..."
+        Write-Step "Python 3.9 or newer not found, installing it with winget ..."
         winget install -e --id Python.Python.3.12 --silent --accept-package-agreements --accept-source-agreements
         $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
         $py = Find-Python
     }
     if (-not $py) {
-        Write-Bad "Python 3 is required. Install it from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then run this again."
+        Write-Bad "Python 3.9 or newer is required. Install it from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), then run this again."
         return
     }
 

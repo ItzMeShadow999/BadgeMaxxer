@@ -1,0 +1,6 @@
+session.json
+Watcher/watcher_session.json
+Watcher/watcher_debug.log
+data/
+__pycache__/
+.venv/

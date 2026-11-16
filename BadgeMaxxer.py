@@ -646,7 +646,7 @@ def arrow_menu(title: str, options: Sequence[str], hint: str = "↑/↓ move · 
         for i, opt in enumerate(options, 1):
             print(f"    {i}. {opt}")
         raw = input("  › ").strip()
-        return int(raw) - 1 if raw.isdigit() and 1 <= int(raw) <= n else None
+        return int(raw) - 1 if raw.isdecimal() and 1 <= int(raw) <= n else None
 
     sel = start if 0 <= start < n else 0
     view = min(n, menu_capacity())
@@ -836,7 +836,7 @@ _COOKIE_IN_PASTE = re.compile(
 def extract_cookie_header(raw: str) -> str:
     raw = raw.strip()
     m = _COOKIE_IN_PASTE.search(raw)
-    return (m.group(1) if m else raw).strip()
+    return (m.group(1) if m else raw).strip().strip("'\"").strip()
 
 
 def fetch_base_cookies(url: str = "https://discord.com/app") -> str:
@@ -889,6 +889,8 @@ class AccountSessionState:
                 existing = json.loads(STATE_STORAGE_PATH.read_text(encoding="utf-8"))
             except Exception:
                 pass
+        if not isinstance(existing, dict):
+            existing = {}
         existing.update(asdict(self))
         if os.name == "nt":
             STATE_STORAGE_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
@@ -1084,16 +1086,12 @@ def parse_catalog_entries(raw_json: str) -> list[DetectableTitle]:
 
 
 def load_game_catalog() -> list[DetectableTitle]:
-    cached_content = ""
-    if DATABASE_STORAGE_PATH.exists():
-        cached_content = DATABASE_STORAGE_PATH.read_text(encoding="utf-8").strip()
-    if cached_content:
-        try:
-            titles = parse_catalog_entries(cached_content)
-            if titles:
-                return titles
-        except (json.JSONDecodeError, ValueError):
-            pass
+    try:
+        titles = parse_catalog_entries(DATABASE_STORAGE_PATH.read_text(encoding="utf-8"))
+        if titles:
+            return titles
+    except (OSError, ValueError, AttributeError, TypeError):
+        pass
     try:
         return parse_catalog_entries(fetch_remote_catalog())
     except Exception:
@@ -1454,10 +1452,13 @@ class MiniWebSocket:
             return {"op": "close", "code": code, "reason": reason}
         if opcode == 0x9:
             try:
+                data = self._read_payload(head)
                 with self._lock:
                     if self.sock and not self.closed:
-                        pong = bytearray([0x8A, 0x80])
-                        pong.extend(os.urandom(4))
+                        mask = os.urandom(4)
+                        pong = bytearray([0x8A, 0x80 | len(data)])
+                        pong.extend(mask)
+                        pong.extend(b ^ mask[i % 4] for i, b in enumerate(data))
                         self.sock.sendall(pong)
             except Exception:
                 self.close()
@@ -1480,6 +1481,8 @@ class MiniWebSocket:
                     continue
                 payload += chunk
                 fin = bool(nxt[0] & 0x80)
+            if opcode == 0x2:
+                return {"op": "binary"}
             return json.loads(payload.decode("utf-8"))
         except Exception:
             self.close()
@@ -3319,7 +3322,7 @@ class ApplicationController:
 
         def custom_games() -> int | None:
             raw = input(f"  {T.COLOR_MUTED}Games count (1-{total}):{T.COLOR_RESET} ").strip()
-            if not raw.isdigit() or int(raw) < 1:
+            if not raw.isdecimal() or int(raw) < 1:
                 T.failure("input", "Game count must be a whole number of at least 1.")
                 return None
             return min(int(raw), total)
@@ -3351,7 +3354,7 @@ class ApplicationController:
         duration_ms = int(hours * 3600 * 1000)
         total_aggregate = len(selected_titles) * hours
         print()
-        T.log(f"Submitting {T.COLOR_PRIMARY}{hours:g}h{T.COLOR_TEXT} across {T.COLOR_PRIMARY}{len(selected_titles)}{T.COLOR_TEXT} titles ({total_aggregate:,.0f}h total)")
+        T.log(f"Submitting {T.COLOR_PRIMARY}{hours:g}h{T.COLOR_TEXT} across {T.COLOR_PRIMARY}{len(selected_titles)}{T.COLOR_TEXT} titles ({total_aggregate:,.1f}h total)")
         T.separator()
 
         engine = IngestionPipeline(self.fabricator, self.terminal)
@@ -3361,7 +3364,7 @@ class ApplicationController:
         )
 
         print()
-        T.success("completed", f"{accepted}/{len(selected_titles)} titles processed ({accepted * hours:,.0f}h total)")
+        T.success("completed", f"{accepted}/{len(selected_titles)} titles processed ({accepted * hours:,.1f}h total)")
         self.state.total_games_claimed += accepted
         self.state.total_hours_claimed += accepted * hours
         self.state.persist()
@@ -3499,7 +3502,7 @@ class ApplicationController:
             time.sleep(1)
             return
 
-        target_pid = int(raw_input) if raw_input.isdigit() else 0
+        target_pid = int(raw_input) if raw_input.isdecimal() else 0
         target_path = "" if target_pid else raw_input
         if target_path and not Path(target_path).exists():
             T.failure("fingerprint", f"File path does not exist: {target_path}")
@@ -3794,7 +3797,7 @@ class ApplicationController:
         while True:
             T.display_header()
             T.log(f"Detectable Titles: {T.COLOR_PRIMARY}{len(self.catalog)}{T.COLOR_TEXT}")
-            T.log(f"Cumulative Logged: {T.COLOR_PRIMARY}{self.state.total_games_claimed}{T.COLOR_TEXT} titles · {T.COLOR_PRIMARY}{self.state.total_hours_claimed:,.0f}h{T.COLOR_TEXT} playtime")
+            T.log(f"Cumulative Logged: {T.COLOR_PRIMARY}{self.state.total_games_claimed}{T.COLOR_TEXT} titles · {T.COLOR_PRIMARY}{self.state.total_hours_claimed:,.1f}h{T.COLOR_TEXT} playtime")
             T.log(f"Total Stream Hours: {T.COLOR_PRIMARY}{self.state.total_stream_hours_claimed:,.1f}h{T.COLOR_TEXT} ({self.state.total_stream_sessions} sessions)")
             print()
 
