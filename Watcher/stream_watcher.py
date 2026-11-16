@@ -863,6 +863,9 @@ class StreamWatcher:
         if self.supervisor:
             self.supervisor.cancel()
             self.supervisor = None
+        for link in (self.stream_link, self.main_link):
+            if link and link.task:
+                link.task.cancel()
         self.reset_attempt_state()
         self.voice_session_id = None
 
