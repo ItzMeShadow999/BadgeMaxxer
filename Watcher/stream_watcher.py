@@ -986,13 +986,14 @@ class StreamWatcher:
                 DBG.write("trace", traceback.format_exc())
                 outcome = ("failed", f"unexpected error {exc!r}", None, None)
             held = time.time() - started
+            if outcome[0] == "ended":
+                self.live_event.clear()
             await self.teardown()
 
             if outcome[0] in ("ended", "cycle"):
                 attempts = 0
                 if outcome[0] == "ended":
                     log("Stream ended. Waiting for the target to go live again.")
-                    self.live_event.clear()
                 continue
 
             _, reason, which, code = outcome
