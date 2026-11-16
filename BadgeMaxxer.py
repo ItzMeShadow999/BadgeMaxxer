@@ -1567,11 +1567,13 @@ class VoiceConnection:
             self.ws.connect()
         except Exception as exc:
             C.err(self.label, f"ws connect failed: {exc}")
+            self.close()
             return False
 
         msg = self._recv_op(8, timeout=10)
         if not msg:
             C.err(self.label, "no Hello from voice server")
+            self.close()
             return False
         self.heartbeat_interval = msg.get("d", {}).get("heartbeat_interval", 13750) / 1000.0
 
@@ -1594,6 +1596,7 @@ class VoiceConnection:
         msg = self._recv_op(2, timeout=10)
         if not msg:
             C.err(self.label, "no Ready from voice server")
+            self.close()
             return False
 
         d = msg.get("d", {})
