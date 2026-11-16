@@ -45,6 +45,10 @@ find_python() {
     return 1
 }
 
+drop_downloads() {
+    for file in $FILES; do rm -f "$DIR/$file.download"; done
+}
+
 resolve_tag() {
     if [ -n "$TAG" ]; then
         echo "$TAG"
@@ -94,7 +98,7 @@ install_badgemaxxer() {
         temp="$target.download"
         step "Fetching $file ...."
         if ! fetch "$base/$file" "$temp"; then
-            rm -f "$temp"
+            drop_downloads
             bad "Could not install $file : download failed"
             return 1
         fi
@@ -109,17 +113,19 @@ install_badgemaxxer() {
         done < "$sums"
         actual="$(sha256 "$temp")"
         if [ -z "$expected" ]; then
-            rm -f "$temp"
+            drop_downloads
             bad "Could not install $file : no checksum listed for $file in SHA256SUMS"
             return 1
         fi
         if [ "$actual" != "$expected" ]; then
-            rm -f "$temp"
+            drop_downloads
             bad "Could not install $file : checksum mismatch (expected $expected, got $actual)"
             return 1
         fi
         ok "Verified $file (sha256 $(printf '%.16s' "$actual")...)"
-        mv -f "$temp" "$target"
+    done
+    for file in $FILES; do
+        mv -f "$DIR/$file.download" "$DIR/$file"
     done
     rm -f "$sums"
     ok "Files saved to $DIR (your session.json is never touched)"
