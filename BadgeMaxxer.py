@@ -836,7 +836,10 @@ _COOKIE_IN_PASTE = re.compile(
 def extract_cookie_header(raw: str) -> str:
     raw = raw.strip()
     m = _COOKIE_IN_PASTE.search(raw)
-    return (m.group(1) if m else raw).strip().strip("'\"").strip()
+    val = (m.group(1) if m else raw).strip()
+    if len(val) > 1 and val[0] == val[-1] and val[0] in "'\"":
+        val = val[1:-1].strip()
+    return val
 
 
 def fetch_base_cookies(url: str = "https://discord.com/app") -> str:
