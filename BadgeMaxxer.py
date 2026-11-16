@@ -1239,6 +1239,7 @@ class IngestionPipeline:
     def __init__(self, fabricator: TelemetryEventFabricator, terminal: TerminalInterface) -> None:
         self.fabricator = fabricator
         self.terminal = terminal
+        self.accepted_ids: list[str] = []
 
     def execute_stream(self, titles: Sequence[DetectableTitle], session_builder) -> int:
         total_records = len(titles)
@@ -1252,6 +1253,7 @@ class IngestionPipeline:
             http_status = self.fabricator.post_telemetry_batch(accumulated_events)
             if http_status == 204:
                 processed_successfully += len(partition)
+                self.accepted_ids.extend(target.title_id for target in partition)
                 self.terminal.dispatched(f"batch {batch_index}", f"{processed_successfully}/{total_records} titles accepted")
             elif http_status in (401, 403):
                 self.terminal.failure(
@@ -3370,6 +3372,9 @@ class ApplicationController:
             selected_titles,
             lambda title: self.fabricator.assemble_complete_session(title, duration_ms)
         )
+
+        picked = {title.title_id for title in selected_titles}
+        self.state.used_games = [gid for gid in self.state.used_games if gid not in picked or gid in engine.accepted_ids]
 
         print()
         T.success("completed", f"{accepted}/{len(selected_titles)} titles processed ({accepted * hours:,.1f}h total)")
