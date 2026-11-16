@@ -2915,19 +2915,20 @@ class GatewayStreamEngine:
     def _cleanup(self, guild_id: str) -> None:
         C = self.console
         self.running = False
+        ws = self.ws
 
-        if self.ws and not self.ws.closed and self.stream_key:
+        if ws and not ws.closed and self.stream_key:
             try:
-                self.ws.send(json.dumps({
+                ws.send(json.dumps({
                     "op": 19,
                     "d": {"stream_key": self.stream_key},
                 }))
             except Exception:
                 pass
 
-        if self.ws and not self.ws.closed and not self._user_left_vc:
+        if ws and not ws.closed and not self._user_left_vc:
             try:
-                self.ws.send(json.dumps({
+                ws.send(json.dumps({
                     "op": 4,
                     "d": {
                         "guild_id": guild_id,
@@ -2944,9 +2945,9 @@ class GatewayStreamEngine:
             self.stream_conn.close()
         if self.voice_conn:
             self.voice_conn.close()
-        if self.ws:
+        if ws:
             time.sleep(0.3)
-            self.ws.close()
+            ws.close()
 
         if (self.stream_connected or self.stream_ever_active) and self.start_time > 0:
             elapsed = time.time() - self.start_time
