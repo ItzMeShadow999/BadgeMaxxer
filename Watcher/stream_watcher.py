@@ -783,6 +783,9 @@ class StreamWatcher:
                 elif code in (4007, 4009):
                     self.session_id = self.seq = self.resume_url = None
                 return f"closed {code}"
+            except asyncio.CancelledError:
+                await self.teardown(pause=0)
+                raise
             finally:
                 if hb:
                     hb.cancel()
