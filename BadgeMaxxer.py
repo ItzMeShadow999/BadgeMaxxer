@@ -1431,9 +1431,10 @@ class MiniWebSocket:
         if self.closed or not self.sock:
             return None
         try:
-            r, _, _ = select.select([self.sock], [], [], timeout)
-            if not r:
-                return None
+            if not (isinstance(self.sock, ssl.SSLSocket) and self.sock.pending()):
+                r, _, _ = select.select([self.sock], [], [], timeout)
+                if not r:
+                    return None
             head = self._recv_exact(2)
         except Exception:
             self.close()
