@@ -3041,7 +3041,7 @@ def github_device_login(T: "TerminalInterface") -> str:
                   "grant_type": "urn:ietf:params:oauth:grant-type:device_code"},
             accept="application/json",
         )
-        if st == 0:
+        if st == 0 or st == 429 or st >= 500:
             continue
         if isinstance(r, dict) and r.get("access_token"):
             return str(r["access_token"])
