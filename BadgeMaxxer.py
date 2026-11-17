@@ -836,7 +836,10 @@ _COOKIE_IN_PASTE = re.compile(
 def extract_cookie_header(raw: str) -> str:
     raw = raw.strip()
     m = _COOKIE_IN_PASTE.search(raw)
-    return (m.group(1) if m else raw).strip().strip("'\"").strip()
+    val = (m.group(1) if m else raw).strip()
+    if len(val) > 1 and val[0] == val[-1] and val[0] in "'\"":
+        val = val[1:-1].strip()
+    return val
 
 
 def fetch_base_cookies(url: str = "https://discord.com/app") -> str:
@@ -1236,6 +1239,7 @@ class IngestionPipeline:
     def __init__(self, fabricator: TelemetryEventFabricator, terminal: TerminalInterface) -> None:
         self.fabricator = fabricator
         self.terminal = terminal
+        self.accepted_ids: list[str] = []
 
     def execute_stream(self, titles: Sequence[DetectableTitle], session_builder) -> int:
         total_records = len(titles)
@@ -1249,6 +1253,7 @@ class IngestionPipeline:
             http_status = self.fabricator.post_telemetry_batch(accumulated_events)
             if http_status == 204:
                 processed_successfully += len(partition)
+                self.accepted_ids.extend(target.title_id for target in partition)
                 self.terminal.dispatched(f"batch {batch_index}", f"{processed_successfully}/{total_records} titles accepted")
             elif http_status in (401, 403):
                 self.terminal.failure(
@@ -1564,11 +1569,13 @@ class VoiceConnection:
             self.ws.connect()
         except Exception as exc:
             C.err(self.label, f"ws connect failed: {exc}")
+            self.close()
             return False
 
         msg = self._recv_op(8, timeout=10)
         if not msg:
             C.err(self.label, "no Hello from voice server")
+            self.close()
             return False
         self.heartbeat_interval = msg.get("d", {}).get("heartbeat_interval", 13750) / 1000.0
 
@@ -1591,6 +1598,7 @@ class VoiceConnection:
         msg = self._recv_op(2, timeout=10)
         if not msg:
             C.err(self.label, "no Ready from voice server")
+            self.close()
             return False
 
         d = msg.get("d", {})
@@ -3363,6 +3371,9 @@ class ApplicationController:
             lambda title: self.fabricator.assemble_complete_session(title, duration_ms)
         )
 
+        picked = {title.title_id for title in selected_titles}
+        self.state.used_games = [gid for gid in self.state.used_games if gid not in picked or gid in engine.accepted_ids]
+
         print()
         T.success("completed", f"{accepted}/{len(selected_titles)} titles processed ({accepted * hours:,.1f}h total)")
         self.state.total_games_claimed += accepted
@@ -3373,6 +3384,10 @@ class ApplicationController:
         return accepted
 
     def trigger_playtime_ingestion(self, default_games: int | None = None, default_hours: float = 1.0, label: str = "Game Time") -> None:
+        if not self._star_gate(quiet=True):
+            self.terminal.failure("star", f"Star/follow check failed, {label} stopped.")
+            self._pause("exit")
+            return
         if not self._ensure_runtime_readiness():
             self._pause()
             return
@@ -3409,6 +3424,10 @@ class ApplicationController:
         return left
 
     def trigger_streaming(self) -> None:
+        if not self._star_gate(quiet=True):
+            self.terminal.failure("star", "Star/follow check failed, Streaming stopped.")
+            self._pause("exit")
+            return
         if not self._ensure_runtime_readiness():
             self._pause()
             return
@@ -3452,13 +3471,25 @@ class ApplicationController:
         print()
         T.separator()
         T.log(f"{T.COLOR_PRIMARY}Game Time{T.COLOR_RESET}")
+        if not self._star_gate(quiet=True):
+            T.failure("star", "Star/follow check failed before Game Time, stopping.")
+            self._pause("exit")
+            return
         self._run_claim(*time_params)
         T.separator()
         T.log(f"{T.COLOR_PRIMARY}Game Variety{T.COLOR_RESET}")
+        if not self._star_gate(quiet=True):
+            T.failure("star", "Star/follow check failed before Game Variety, stopping.")
+            self._pause("exit")
+            return
         self._run_claim(*variety_params)
         if stream_hours > 0:
             T.separator()
             T.log(f"{T.COLOR_PRIMARY}Streaming{T.COLOR_RESET}")
+            if not self._star_gate(quiet=True):
+                T.failure("star", "Star/follow check failed before Streaming, stopping.")
+                self._pause("exit")
+                return
             self.run_gateway_live_streamer(stream_hours)
         else:
             self._pause()
@@ -3474,8 +3505,7 @@ class ApplicationController:
             chosen = unprocessed
             if processed:
                 needed = desired_amount - len(chosen)
-                rotated = processed[needed:] + processed[:needed]
-                chosen.extend(rotated[:needed])
+                chosen.extend(processed[:needed])
 
         self.state.used_games = [gid for gid in self.state.used_games if gid not in chosen] + chosen
         registry = {item.title_id: item for item in self.catalog}
@@ -3804,10 +3834,6 @@ class ApplicationController:
             choice = arrow_menu("Select what badge to level", options)
             print()
             if choice is None or choice == 8:
-                break
-            if not self._star_gate(quiet=True):
-                T.failure("star", "Star check failed, BadgeMaxxer is stopping.")
-                self._pause("exit")
                 break
             if choice == 0:
                 self.level_up_all()
