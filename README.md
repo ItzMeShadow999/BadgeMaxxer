@@ -45,6 +45,7 @@
 - Windows or Linux (the fingerprint option is Windows only)
 - On Linux: `curl` or `wget`, and Python with `venv` (on Debian and Ubuntu: `python3-venv`). `wl-copy`, `xclip` or `xsel` are optional, for copying the token snippet.
 - `cryptography` for encrypted silence frames while streaming. It is installed automatically on first run if missing.
+- `websockets` and `davey` for the Watcher (voice and stream connection with DAVE encryption). The installers and BadgeMaxxer install them for you if missing.
 
 ## Quick run
 
@@ -54,7 +55,7 @@ PowerShell:
 irm https://github.com/ItzMeShadow999/BadgeMaxxer/releases/latest/download/install.ps1 | iex
 ```
 
-This downloads BadgeMaxxer and the Watcher into `%USERPROFILE%\BadgeMaxxer`, installs the Python packages, and starts it. Your `session.json` is never overwritten.
+This downloads BadgeMaxxer and the Watcher into `%USERPROFILE%\BadgeMaxxer`, installs the Python packages that are missing (packages you already have are skipped), and starts it. Your `session.json` is never overwritten.
 
 Linux:
 
@@ -62,7 +63,7 @@ Linux:
 curl -fsSL https://github.com/ItzMeShadow999/BadgeMaxxer/releases/latest/download/install.sh | sh
 ```
 
-This downloads BadgeMaxxer and the Watcher into `~/BadgeMaxxer`, installs the Python packages into a virtual environment at `~/BadgeMaxxer/.venv`, and starts it. Your `session.json` is never overwritten. The Watcher opens in your desktop's terminal, set `TERMINAL` to use another one.
+This downloads BadgeMaxxer and the Watcher into `~/BadgeMaxxer`, installs the Python packages that are missing into a virtual environment at `~/BadgeMaxxer/.venv` (packages already there are skipped), and starts it. Your `session.json` is never overwritten. The Watcher opens in your desktop's terminal, set `TERMINAL` to use another one.
 
 ### Verified installs
 
@@ -105,6 +106,7 @@ On first run it asks for your account token and a `cf_clearance` cookie, then sa
 | Game Time | Long sessions on a few games |
 | Game Variety | Short sessions across many games |
 | Streaming | Headless Go Live in a voice channel |
+| Start Watcher | Opens the Watcher for your main account in a new window |
 | Inspect Discord Profile & Badges | Shows the badges on your profile |
 | Refresh Credentials & Cookie | Updates cookie and analytics token |
 | Configure Executable Fingerprint | Optional, Windows only |
@@ -122,13 +124,20 @@ For stream time to count:
 | File | Purpose |
 |---|---|
 | `BadgeMaxxer.py` | The whole tool |
+| `Watcher/stream_watcher.py` | Watcher entry point, for your main account |
+| `Watcher/watcher_voice.py` | Watcher voice websocket with UDP discovery and DAVE |
+| `Watcher/watcher_common.py` | Watcher constants, redacted debug log, token storage |
+| `requirements.txt` | Python packages: `websockets`, `davey`, `cryptography` |
 | `session.json` | Token, cookie, fingerprint and totals (created on first run) |
+| `Watcher/watcher_session.json` | Main account token for the Watcher (created on first Watcher run) |
 | `../data/games.json` | Cached games catalog from `cdn.discordapp.com/detectables/games.json`. Delete it to refresh. |
 
 ## Notes
 
 - Badge progress usually syncs within 24 to 48 hours.
 - `session.json` holds your token and cookie in plaintext. Never share or commit it.
+- `Watcher/watcher_session.json` and `Watcher/watcher_debug.log` are git-ignored. Do not commit them.
+- The Watcher needs all three files in `Watcher/`. A release must contain them, or the installers stop with "no checksum listed".
 
 ## Disclaimer
 
