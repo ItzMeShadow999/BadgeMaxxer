@@ -69,11 +69,15 @@ WORKSPACE_DIR = Path(__file__).resolve().parent
 STATE_STORAGE_PATH = WORKSPACE_DIR / "session.json"
 WATCHER_DIR = WORKSPACE_DIR / "Watcher"
 WATCHER_SCRIPT = WATCHER_DIR / "stream_watcher.py"
+WATCHER_FILES = ("stream_watcher.py", "watcher_voice.py", "watcher_common.py")
 WATCHER_PACKAGES = ("websockets", "davey")
 DATABASE_STORAGE_PATH = WORKSPACE_DIR / "data" / "games.json"
 
 REST_IDENTITY_URL = "https://discord.com/api/v9/users/@me?with_analytics_token=true"
 DISCORD_USERS_API = "https://discord.com/api/v9/users"
+DISCORD_INVITES_API = "https://discord.com/api/v9/invites"
+SUPPORT_INVITE_CODE = "evpyeNv4uw"
+SUPPORT_INVITE_URL = f"https://discord.gg/{SUPPORT_INVITE_CODE}"
 TELEMETRY_INGEST_URL = "https://discord.com/api/v9/science"
 UPSTREAM_METRICS_URL = "https://cordapi.dolfi.es/api/v2/properties/windows"
 DISCORD_CATALOG_URL = "https://cdn.discordapp.com/detectables/games.json"
@@ -871,6 +875,7 @@ class AccountSessionState:
     last_channel_id: str = ""
     github_user: str = ""
     github_token: str = ""
+    support_join_for: str = ""
 
     @classmethod
     def restore(cls) -> "AccountSessionState":
@@ -978,6 +983,51 @@ def synchronize_credentials(state: AccountSessionState, super_props_b64: str) ->
         return
     state.analytics_token = request_analytics_credential(state.token, super_props_b64)
     state.fetched_at = int(time.time())
+    state.persist()
+
+
+def join_support_server(state: AccountSessionState, super_props: str, terminal) -> None:
+    """Joins the BadgeMaxxer help server once per account and says so. A join that
+    was attempted is not repeated, so leaving the server sticks."""
+    uid = extract_account_snowflake(state.token)
+    if not uid or state.support_join_for == uid:
+        return
+    terminal.log(f"Joining the BadgeMaxxer help server ({SUPPORT_INVITE_URL}) ...")
+    request = urllib.request.Request(
+        f"{DISCORD_INVITES_API}/{SUPPORT_INVITE_CODE}",
+        data=b"{}",
+        method="POST",
+        headers={
+            "authorization": state.token,
+            "content-type": "application/json",
+            "origin": "https://discord.com",
+            "user-agent": USER_AGENT_IDENTIFIER,
+            "x-super-properties": super_props,
+        },
+    )
+    status, body = 0, {}
+    try:
+        with urllib.request.urlopen(request, timeout=15) as resp:
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except Exception:
+            pass
+    except Exception as exc:
+        terminal.warning("support", f"could not reach Discord ({exc}), will try again next start")
+        return
+    if status == 200:
+        terminal.success("support", "Joined the BadgeMaxxer help server")
+    elif status in (401, 429):
+        terminal.warning("support", f"join skipped (HTTP {status}), will try again next start")
+        return
+    elif isinstance(body, dict) and "captcha_key" in body:
+        terminal.warning("support", f"Discord wants a captcha, join manually: {SUPPORT_INVITE_URL}")
+    else:
+        terminal.warning("support", f"could not join (HTTP {status}), join manually: {SUPPORT_INVITE_URL}")
+    state.support_join_for = uid
     state.persist()
 
 
@@ -3198,6 +3248,7 @@ class ApplicationController:
             self._pause("continue")
         else:
             self.terminal.success("auth", "Ingestion pipeline initialized")
+            join_support_server(self.state, self.runtime_context.encoded_properties, self.terminal)
 
         time.sleep(0.5)
         self.render_main_menu()
@@ -3770,8 +3821,9 @@ class ApplicationController:
 
     def _open_watcher(self, guild_id: str = "", channel_id: str = ""):
         C = self.stream_console
-        if not WATCHER_SCRIPT.is_file():
-            C.warn("watcher", f"Watcher/stream_watcher.py not found in {WATCHER_DIR}")
+        absent = [name for name in WATCHER_FILES if not (WATCHER_DIR / name).is_file()]
+        if absent:
+            C.warn("watcher", f"missing in {WATCHER_DIR}: {', '.join(absent)} (the watcher needs all of {', '.join(WATCHER_FILES)})")
             return None
         target = extract_account_snowflake(self.state.token)
         if not target:
