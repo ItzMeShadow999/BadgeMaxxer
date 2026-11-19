@@ -1,4 +1,42 @@
 #!/usr/bin/env python3
+"""
+stream_watcher.py
+
+Script for the MAIN account. It logs in with the main account token, finds the
+voice channel of the account that is Go Live streaming (the BadgeMaxxer
+account), joins it with a real voice connection and opens a viewer connection
+on their stream. Voice and stream connections use Discord's end-to-end
+encryption (DAVE) through the "davey" library.
+
+Files (keep them in the same folder):
+  stream_watcher.py   this file: the watcher logic and the command line
+  watcher_voice.py    VoiceLink, one voice websocket with UDP discovery and DAVE
+  watcher_common.py   constants, redacted debug log, token storage, helpers
+
+Built to keep going:
+  * reconnects and resumes the Discord gateway when the connection drops
+  * retries failed attempts, and on errors such as 4006 automatically rotates
+    through different session ID / group ID combinations
+  * waits for the target to go live and re-watches when the stream restarts
+  * writes a redacted debug log (watcher_debug.log) you can paste when asked
+
+Token handling: read from the DISCORD_MAIN_TOKEN environment variable, else
+from watcher_session.json (saved on first run), else typed at a hidden prompt
+and saved there. A token from the environment variable is never saved. The
+token is never written to the debug log, and is deliberately NOT read from
+BadgeMaxxer's session.json (that file holds the other account's token). A
+rejected token (4004) is deleted automatically; --reset-token forgets it.
+watcher_session.json and watcher_debug.log are git-ignored, never commit them.
+
+Requires: pip install -r requirements.txt   (websockets, davey)
+
+Usage:
+  python stream_watcher.py
+  python stream_watcher.py 1065604516399026176
+  python stream_watcher.py 1065604516399026176 --guild 123 --channel 456
+Stop with Ctrl+C (leaves the stream and the voice channel cleanly).
+"""
+
 import argparse
 import asyncio
 import json
@@ -29,6 +67,7 @@ from watcher_common import (
     exit_pause,
     forget_token,
     get_token,
+    join_support_server,
     load_client_properties,
     log,
     wait_all,
@@ -595,6 +634,7 @@ async def main(args):
     if args.reset_token:
         forget_token()
     token = get_token()
+    join_support_server(token)
     watcher = StreamWatcher(token, target_id, max_attempts=max(1, args.max_attempts), preset=preset)
     log("Connecting to the gateway.")
     await watcher.run()
