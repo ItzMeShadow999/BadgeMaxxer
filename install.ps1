@@ -3,7 +3,7 @@ $Repo   = "badgemaxxer"
 $Tag    = $env:BADGEMAXXER_TAG
 $Releases = "https://github.com/$Owner/$Repo/releases"
 $Dir    = Join-Path $env:USERPROFILE "BadgeMaxxer"
-$Files  = @("BadgeMaxxer.py", "Watcher/stream_watcher.py")
+$Files  = @("BadgeMaxxer.py", "Watcher/stream_watcher.py", "Watcher/watcher_voice.py", "Watcher/watcher_common.py")
 $Packages = @("websockets", "davey", "cryptography")
 
 function Write-Step($text) { Write-Host "  $text" -ForegroundColor Yellow }
@@ -40,7 +40,6 @@ function Install-BadgeMaxxer {
     Write-Host "  BadgeMaxxer installer" -ForegroundColor Yellow
     Write-Host ""
 
-    # Pin to a release tag and load its SHA256SUMS before anything is installed.
     $sumsTemp = Join-Path ([IO.Path]::GetTempPath()) ("BadgeMaxxer-SHA256SUMS-" + [Guid]::NewGuid().ToString("N"))
     $expected = @{}
     try {
@@ -94,10 +93,19 @@ function Install-BadgeMaxxer {
     }
     Write-Ok "Files saved to $Dir (your session.json is never touched)"
 
-    Write-Step "Installing Python packages: $($Packages -join ', ') ..."
-    & $py.Exe @($py.Pre) -m pip install --quiet --disable-pip-version-check @Packages
-    if ($LASTEXITCODE -ne 0) {
-        Write-Bad "pip could not install every package, BadgeMaxxer will try again when it needs them."
+    $Missing = @()
+    foreach ($pkg in $Packages) {
+        & $py.Exe @($py.Pre) -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('$pkg') is None)" 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) { $Missing += $pkg }
+    }
+    if ($Missing.Count -eq 0) {
+        Write-Ok "Python packages already installed: $($Packages -join ', ')"
+    } else {
+        Write-Step "Installing missing Python packages: $($Missing -join ', ') ..."
+        & $py.Exe @($py.Pre) -m pip install --quiet --disable-pip-version-check @Missing
+        if ($LASTEXITCODE -ne 0) {
+            Write-Bad "pip could not install every package, BadgeMaxxer will try again when it needs them."
+        }
     }
 
     Write-Ok "Starting BadgeMaxxer"
