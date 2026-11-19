@@ -9,6 +9,7 @@ Keep the three files in the same folder.
 """
 
 import asyncio
+import base64
 import getpass
 import json
 import os
@@ -16,6 +17,7 @@ import platform
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 
 missing = []
@@ -320,6 +322,69 @@ def load_client_properties(timeout=10):
     except Exception:
         pass
     return dict(CLIENT_PROPERTIES), "fallback"
+
+
+SUPPORT_INVITE = "evpyeNv4uw"
+SUPPORT_MARK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watcher_support.json")
+
+
+def join_support_server(token):
+    """Joins the BadgeMaxxer help server once per account and says so. A join that
+    was attempted is not repeated, so leaving the server sticks."""
+    try:
+        prefix = token.split(".", 1)[0]
+        uid = base64.b64decode(prefix + "=" * (-len(prefix) % 4)).decode("utf-8")
+    except Exception:
+        return
+    if not uid:
+        return
+    try:
+        with open(SUPPORT_MARK_PATH, encoding="utf-8") as fh:
+            if json.load(fh).get("attempted_for") == uid:
+                return
+    except (OSError, ValueError, AttributeError):
+        pass
+    log(f"Joining the BadgeMaxxer help server (discord.gg/{SUPPORT_INVITE}) ...")
+    props, _ = load_client_properties()
+    request = urllib.request.Request(
+        f"https://discord.com/api/v9/invites/{SUPPORT_INVITE}",
+        data=b"{}",
+        method="POST",
+        headers={
+            "authorization": token,
+            "content-type": "application/json",
+            "origin": ORIGIN,
+            "user-agent": props.get("browser_user_agent") or CLIENT_PROPERTIES["browser_user_agent"],
+            "x-super-properties": base64.b64encode(json.dumps(props, separators=(",", ":")).encode("utf-8")).decode("ascii"),
+        },
+    )
+    status, body = 0, {}
+    try:
+        with urllib.request.urlopen(request, timeout=15) as resp:
+            status = resp.status
+    except urllib.error.HTTPError as exc:
+        status = exc.code
+        try:
+            body = json.loads(exc.read().decode("utf-8"))
+        except (OSError, ValueError):
+            pass
+    except Exception as exc:
+        log(f"Could not reach Discord ({exc}), will try the help server join again next start.")
+        return
+    if status == 200:
+        log("Joined the BadgeMaxxer help server.")
+    elif status in (401, 429):
+        log(f"Help server join skipped (HTTP {status}), will try again next start.")
+        return
+    elif isinstance(body, dict) and "captcha_key" in body:
+        log(f"Discord wants a captcha for the help server, join manually: discord.gg/{SUPPORT_INVITE}")
+    else:
+        log(f"Could not join the help server (HTTP {status}), join manually: discord.gg/{SUPPORT_INVITE}")
+    try:
+        with open(SUPPORT_MARK_PATH, "w", encoding="utf-8") as fh:
+            json.dump({"attempted_for": uid}, fh)
+    except OSError:
+        pass
 
 
 async def wait_any(events, timeout):
