@@ -4,3 +4,4 @@ Watcher/watcher_debug.log
 data/
 __pycache__/
 .venv/
+.env
