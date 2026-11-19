@@ -1,7 +1,14 @@
+# secrets and local state, never commit these
 session.json
 Watcher/watcher_session.json
 Watcher/watcher_debug.log
+watcher_session.json
+watcher_debug.log
 data/
+bm_debug/
+
+# python
 __pycache__/
+*.pyc
 .venv/
-.env
+venv/
