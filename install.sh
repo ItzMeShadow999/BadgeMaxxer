@@ -6,7 +6,7 @@ REPO="badgemaxxer"
 TAG="${BADGEMAXXER_TAG:-}"
 RELEASES="https://github.com/$OWNER/$REPO/releases"
 DIR="$HOME/BadgeMaxxer"
-FILES="BadgeMaxxer.py Watcher/stream_watcher.py"
+FILES="BadgeMaxxer.py Watcher/stream_watcher.py Watcher/watcher_voice.py Watcher/watcher_common.py"
 PACKAGES="websockets davey cryptography"
 
 if [ -t 1 ]; then
@@ -124,13 +124,23 @@ install_badgemaxxer() {
     rm -f "$sums"
     ok "Files saved to $DIR (your session.json is never touched)"
 
-    step "Installing Python packages: websockets, davey, cryptography ..."
     if ! "$DIR/.venv/bin/python" -m pip --version >/dev/null 2>&1 && ! "$py" -m venv --clear "$DIR/.venv"; then
         bad "Could not create a virtual environment in $DIR/.venv. On Debian or Ubuntu install python3-venv, then run this again."
         return 1
     fi
-    if ! "$DIR/.venv/bin/python" -m pip install --quiet --disable-pip-version-check $PACKAGES; then
-        bad "pip could not install every package, BadgeMaxxer will try again when it needs them."
+    missing=""
+    for pkg in $PACKAGES; do
+        if ! "$DIR/.venv/bin/python" -c "import importlib.util, sys; sys.exit(importlib.util.find_spec('$pkg') is None)" >/dev/null 2>&1; then
+            missing="$missing $pkg"
+        fi
+    done
+    if [ -z "$missing" ]; then
+        ok "Python packages already installed: $PACKAGES"
+    else
+        step "Installing missing Python packages:$missing ..."
+        if ! "$DIR/.venv/bin/python" -m pip install --quiet --disable-pip-version-check $missing; then
+            bad "pip could not install every package, BadgeMaxxer will try again when it needs them."
+        fi
     fi
 
     ok "Starting BadgeMaxxer"
