@@ -76,7 +76,7 @@ DATABASE_STORAGE_PATH = WORKSPACE_DIR / "data" / "games.json"
 REST_IDENTITY_URL = "https://discord.com/api/v9/users/@me?with_analytics_token=true"
 DISCORD_USERS_API = "https://discord.com/api/v9/users"
 DISCORD_INVITES_API = "https://discord.com/api/v9/invites"
-SUPPORT_INVITE_CODE = "evpyeNv4uw"
+SUPPORT_INVITE_CODE = "QKv6eu9B5F"
 SUPPORT_INVITE_URL = f"https://discord.gg/{SUPPORT_INVITE_CODE}"
 TELEMETRY_INGEST_URL = "https://discord.com/api/v9/science"
 UPSTREAM_METRICS_URL = "https://cordapi.dolfi.es/api/v2/properties/windows"
@@ -986,18 +986,68 @@ def synchronize_credentials(state: AccountSessionState, super_props_b64: str) ->
     state.persist()
 
 
+def solve_captcha_locally(sitekey: str, rqdata: str, terminal, timeout: float = 240.0) -> str:
+    import http.server
+    result: dict[str, str] = {}
+    page = (
+        "<!doctype html><meta charset=utf-8><title>Captcha</title>"
+        "<body style=\"font-family:sans-serif;background:#111;color:#eee;display:flex;"
+        "align-items:center;justify-content:center;height:100vh;margin:0\">"
+        "<div><div id=c></div><p id=m>Solve the captcha.</p></div>"
+        "<script>var KEY=" + json.dumps(sitekey).replace("</", "<\\/") + ",DATA=" + json.dumps(rqdata or "").replace("</", "<\\/") + ";"
+        "function ready(){var id=hcaptcha.render('c',{sitekey:KEY,theme:'dark',callback:function(t){"
+        "fetch('/token',{method:'POST',body:JSON.stringify({token:t})}).then(function(){"
+        "document.getElementById('m').textContent='Done, you can close this tab.'})}});"
+        "if(DATA){try{hcaptcha.setData(id,{rqdata:DATA})}catch(e){}}}</script>"
+        "<script src=\"https://js.hcaptcha.com/1/api.js?render=explicit&onload=ready\" async defer></script>"
+    ).encode("utf-8")
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args: Any) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("content-length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+
+        def do_POST(self) -> None:
+            try:
+                size = int(self.headers.get("content-length") or 0)
+                result["token"] = str(json.loads(self.rfile.read(size).decode("utf-8")).get("token", ""))
+            except Exception:
+                pass
+            self.send_response(204)
+            self.end_headers()
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    url = f"http://127.0.0.1:{port}/"
+    terminal.log(f"Captcha page: {url} (opened in your browser, waiting up to {int(timeout)}s)")
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+    deadline = time.time() + timeout
+    while time.time() < deadline and not result.get("token"):
+        time.sleep(0.3)
+    time.sleep(0.3)
+    server.shutdown()
+    server.server_close()
+    return result.get("token", "")
+
+
 def join_support_server(state: AccountSessionState, super_props: str, terminal) -> None:
-    """Joins the BadgeMaxxer help server once per account and says so. A join that
-    was attempted is not repeated, so leaving the server sticks."""
     uid = extract_account_snowflake(state.token)
     if not uid or state.support_join_for == uid:
         return
     terminal.log(f"Joining the BadgeMaxxer help server ({SUPPORT_INVITE_URL}) ...")
-    request = urllib.request.Request(
-        f"{DISCORD_INVITES_API}/{SUPPORT_INVITE_CODE}",
-        data=b"{}",
-        method="POST",
-        headers={
+
+    def attempt(captcha_key: str = "", rqtoken: str = "") -> tuple[int, dict]:
+        headers = {
             "authorization": state.token,
             "content-type": "application/json",
             "origin": "https://discord.com",
@@ -1012,31 +1062,58 @@ def join_support_server(state: AccountSessionState, super_props: str, terminal) 
             "x-discord-timezone": "UTC",
             "accept-language": "en-US,en;q=0.9",
             **({"cookie": state.cookie} if state.cookie else {}),
-        },
-    )
-    status, body = 0, {}
-    try:
-        with urllib.request.urlopen(request, timeout=15) as resp:
-            status = resp.status
-    except urllib.error.HTTPError as exc:
-        status = exc.code
+        }
+        if captcha_key:
+            headers["x-captcha-key"] = captcha_key
+        if rqtoken:
+            headers["x-captcha-rqtoken"] = rqtoken
+        request = urllib.request.Request(
+            f"{DISCORD_INVITES_API}/{SUPPORT_INVITE_CODE}",
+            data=b"{}", method="POST", headers=headers,
+        )
+        status, body = 0, {}
         try:
-            body = json.loads(exc.read().decode("utf-8"))
-        except Exception:
-            pass
-    except Exception as exc:
-        terminal.warning("support", f"could not reach Discord ({exc}), will try again next start")
+            with urllib.request.urlopen(request, timeout=15) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            try:
+                body = json.loads(exc.read().decode("utf-8"))
+            except Exception:
+                pass
+        except Exception as exc:
+            terminal.warning("support", f"could not reach Discord ({exc}), will try again next start")
+            return -1, {}
+        return status, body if isinstance(body, dict) else {}
+
+    status, body = attempt()
+    if status == -1:
         return
+    if "captcha_key" in body and body.get("captcha_sitekey"):
+        if str(body.get("captcha_service") or "hcaptcha") != "hcaptcha":
+            terminal.warning("support", f"unsupported captcha type, join manually: {SUPPORT_INVITE_URL}")
+            state.support_join_for = uid
+            state.persist()
+            return
+        terminal.log("Discord wants a captcha, opening only the captcha ...")
+        token = solve_captcha_locally(str(body["captcha_sitekey"]), str(body.get("captcha_rqdata") or ""), terminal)
+        if not token:
+            terminal.warning("support", "captcha not solved in time, will try again next start")
+            return
+        status, body = attempt(token, str(body.get("captcha_rqtoken") or ""))
+        if status == -1:
+            return
+
     detail = ""
-    if isinstance(body, dict) and body:
+    if body:
         detail = str(body.get("message") or body.get("captcha_key") or body)[:160]
     if status == 200:
         terminal.success("support", "Joined the BadgeMaxxer help server")
     elif status in (401, 429):
         terminal.warning("support", f"join skipped (HTTP {status}), will try again next start")
         return
-    elif isinstance(body, dict) and "captcha_key" in body:
-        terminal.warning("support", f"Discord wants a captcha, join manually: {SUPPORT_INVITE_URL}")
+    elif "captcha_key" in body:
+        terminal.warning("support", f"captcha rejected by Discord, join manually: {SUPPORT_INVITE_URL}")
     elif status == 403 or status == 0:
         terminal.warning("support", f"blocked (HTTP {status}) {detail}, check your cookie in the credentials menu, will try again next start. Manual: {SUPPORT_INVITE_URL}")
         return
@@ -1428,8 +1505,10 @@ class MiniWebSocket:
         self.sock: ssl.SSLSocket | None = None
         self.closed = True
         self._lock = threading.RLock()
+        self._buf = b""
 
     def connect(self) -> None:
+        self._buf = b""
         raw_sock = socket.create_connection((self.host, self.port), timeout=15)
         ctx = ssl.create_default_context()
         self.sock = ctx.wrap_socket(raw_sock, server_hostname=self.host)
@@ -1457,6 +1536,7 @@ class MiniWebSocket:
         first_line = header_data.split(b"\r\n")[0].decode("utf-8", "ignore")
         if "101" not in first_line:
             raise ConnectionError(f"handshake rejected: {first_line}")
+        self._buf = header_data.split(b"\r\n\r\n", 1)[1]
         self.closed = False
 
     def send(self, data: str) -> None:
@@ -1487,6 +1567,10 @@ class MiniWebSocket:
 
     def _recv_exact(self, n: int) -> bytes:
         buf = bytearray()
+        if self._buf:
+            take = self._buf[:n]
+            self._buf = self._buf[len(take):]
+            buf.extend(take)
         while len(buf) < n:
             chunk = self.sock.recv(n - len(buf))
             if not chunk:
@@ -1498,9 +1582,10 @@ class MiniWebSocket:
         if self.closed or not self.sock:
             return None
         try:
-            r, _, _ = select.select([self.sock], [], [], timeout)
-            if not r:
-                return None
+            if not self._buf and not self.sock.pending():
+                r, _, _ = select.select([self.sock], [], [], timeout)
+                if not r:
+                    return None
             head = self._recv_exact(2)
         except Exception:
             self.close()
@@ -2765,8 +2850,6 @@ class GatewayStreamEngine:
         C.ok("voice", f"rejoining voice channel {C.ORANGE}{channel_id}{C.RESET}")
 
     def _open_stream_conn(self, channel_id: str) -> None:
-        """Opens the second (stream) voice connection once the STREAM_CREATE ids and the
-        STREAM_SERVER_UPDATE route are both known, then announces the video stream on it."""
         C = self.console
         if self.stream_conn or not self.stream_endpoint or not self.stream_token or not self._rtc_server_id:
             return
@@ -3167,7 +3250,10 @@ def github_device_login(T: "TerminalInterface") -> str:
                   "grant_type": "urn:ietf:params:oauth:grant-type:device_code"},
             accept="application/json",
         )
-        if st == 0:
+        if st == 429:
+            interval += 5
+            continue
+        if st == 0 or st >= 500:
             continue
         if isinstance(r, dict) and r.get("access_token"):
             return str(r["access_token"])
