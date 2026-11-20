@@ -281,15 +281,25 @@ def forget_token():
         pass
 
 
-def get_token():
-    token = os.environ.get("DISCORD_MAIN_TOKEN", "").strip()
+def token_user_id(token):
+    """Account id encoded in the first part of a user token, or "" if it cannot be read."""
+    try:
+        prefix = token.split(".", 1)[0]
+        return base64.b64decode(prefix + "=" * (-len(prefix) % 4)).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def get_token(fresh=False):
+    """The ALT account token (the account that watches). fresh=True skips the environment and the saved file."""
+    token = "" if fresh else (os.environ.get("DISCORD_ALT_TOKEN") or os.environ.get("DISCORD_MAIN_TOKEN") or "").strip()
     save = False
-    if not token:
+    if not token and not fresh:
         token = load_saved_token()
         if token:
-            print("Main account token loaded from watcher_session.json.")
+            print("Alt account token loaded from watcher_session.json.")
     if not token:
-        token = getpass.getpass("Main account token (hidden, saved to watcher_session.json): ").strip()
+        token = getpass.getpass("Alt account token (hidden, saved to watcher_session.json): ").strip()
         save = True
     token = token.strip('"').strip("'")
     if not token:
@@ -383,11 +393,7 @@ def solve_captcha_locally(sitekey, rqdata, timeout=240.0):
 
 
 def join_support_server(token):
-    try:
-        prefix = token.split(".", 1)[0]
-        uid = base64.b64decode(prefix + "=" * (-len(prefix) % 4)).decode("utf-8")
-    except Exception:
-        return
+    uid = token_user_id(token)
     if not uid:
         return
     try:
