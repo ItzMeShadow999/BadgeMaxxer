@@ -1,6 +1,6 @@
 # Watcher
 
-Runs on the MAIN account. It joins the voice channel of the account that is Go Live streaming, then opens a viewer connection on that stream.
+Runs on an ALT account. It joins the voice channel of the main account that is Go Live streaming (the account BadgeMaxxer uses), then opens a viewer connection on that stream.
 
 Files, keep them in one folder:
 
@@ -17,4 +17,4 @@ BadgeMaxxer starts it for you from the Streaming and Start Watcher menu entries,
 
 Requirements: `websockets` and `davey`. The BadgeMaxxer installers (`install.ps1`, `install.sh`) download all three files and install whichever of these packages is missing. If you run the Watcher from the `Watcher/` folder yourself, use `pip install -r ../requirements.txt` when `requirements.txt` sits in the repo root.
 
-The main account token is read from `DISCORD_MAIN_TOKEN`, else `watcher_session.json`, else a hidden prompt. `watcher_session.json` and `watcher_debug.log` are listed in `.gitignore`, do not commit them. `--reset-token` forgets the saved token.
+The alt account token is read from `DISCORD_ALT_TOKEN` (`DISCORD_MAIN_TOKEN` still works), else `watcher_session.json`, else a hidden prompt. `watcher_session.json` and `watcher_debug.log` are listed in `.gitignore`, do not commit them. `--reset-token` forgets the saved token. A token that belongs to the account being watched is dropped and asked for again.
