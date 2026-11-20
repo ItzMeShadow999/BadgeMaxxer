@@ -88,6 +88,8 @@ TIME_DEFAULT_GAMES = 3
 TIME_DEFAULT_HOURS = 10.0
 VARIETY_DEFAULT_HOURS = 1.0
 STREAM_DEFAULT_HOURS = 1.0
+AUTO_GUILD_ID = "1573044682051551262"
+AUTO_CHANNEL_ID = "1573245332492656702"
 STREAM_ROTATE_SEC = 4 * 3600
 STREAM_REJOIN_GAP_SEC = 3.0
 NETWORK_COOLDOWN_SEC = 0.3
@@ -3639,13 +3641,17 @@ class ApplicationController:
         if not self._ensure_runtime_readiness():
             self._pause()
             return
+        self.terminal.display_header()
+        mode = self._streamer_gate()
+        if mode in (None, "manual"):
+            return
         hours = self._pick_stream_hours(fresh_screen=True)
         if hours == BACK_TO_MENU:
             return
         if hours is None:
             self._pause()
             return
-        self.run_gateway_live_streamer(hours)
+        self.run_gateway_live_streamer(hours, mode)
 
     def level_up_all(self) -> None:
         T = self.terminal
@@ -3669,7 +3675,10 @@ class ApplicationController:
             self._pause()
             return
         print()
-        stream_hours = self._pick_stream_hours(allow_zero=True)
+        stream_mode = self._streamer_gate()
+        if stream_mode is None:
+            return
+        stream_hours = 0.0 if stream_mode == "manual" else self._pick_stream_hours(allow_zero=True)
         if stream_hours == BACK_TO_MENU:
             return
         if stream_hours is None:
@@ -3698,7 +3707,7 @@ class ApplicationController:
                 T.failure("star", "Star/follow check failed before Streaming, stopping.")
                 self._pause("exit")
                 return
-            self.run_gateway_live_streamer(stream_hours)
+            self.run_gateway_live_streamer(stream_hours, stream_mode)
         else:
             self._pause()
 
@@ -3827,7 +3836,7 @@ class ApplicationController:
         T.separator()
         input(f"  {T.COLOR_PRIMARY}›{T.COLOR_RESET} Press enter to continue")
 
-    def _choose_stream_target(self) -> tuple[str, str] | None:
+    def _choose_stream_target(self, auto: bool = False) -> tuple[str, str] | None:
         C = self.stream_console
         props = self.runtime_context.encoded_properties
         st, me = _discord_api_get("https://discord.com/api/v9/users/@me", self.state.token, props)
@@ -3837,6 +3846,11 @@ class ApplicationController:
             return None
         if st == 200:
             C.ok("account", f"signed in as {me.get('global_name') or me.get('username')} ({me.get('id')})")
+        if auto:
+            C.info("auto select: joining your voice channel")
+            if self._validate_target(AUTO_GUILD_ID, AUTO_CHANNEL_ID):
+                return AUTO_GUILD_ID, AUTO_CHANNEL_ID
+            C.warn("auto", "could not use that voice channel, pick another target")
         C.info("scanning your servers for crowded voice channels (up to 15s)...")
         dbg: dict = {}
         all_guilds: list[dict] = []
@@ -3874,21 +3888,27 @@ class ApplicationController:
                 guild_id, channel_id = self._ask_stream_target_manually()
                 if not guild_id:
                     continue
-            print()
-            C.info("verifying server, voice channel, and streaming permissions...")
-            valid, _info = validate_stream_target(
-                token=self.state.token,
-                super_props=self.runtime_context.encoded_properties,
-                guild_id=guild_id,
-                channel_id=channel_id,
-                console=C,
-            )
-            if valid:
-                self.state.last_guild_id = guild_id
-                self.state.last_channel_id = channel_id
-                self.state.save()
+            if self._validate_target(guild_id, channel_id):
                 return guild_id, channel_id
             print()
+
+    def _validate_target(self, guild_id: str, channel_id: str) -> bool:
+        """Checks the server, the voice channel and the Go Live permission, and remembers the target when valid."""
+        C = self.stream_console
+        print()
+        C.info("verifying server, voice channel, and streaming permissions...")
+        valid, _info = validate_stream_target(
+            token=self.state.token,
+            super_props=self.runtime_context.encoded_properties,
+            guild_id=guild_id,
+            channel_id=channel_id,
+            console=C,
+        )
+        if valid:
+            self.state.last_guild_id = guild_id
+            self.state.last_channel_id = channel_id
+            self.state.save()
+        return valid
 
     def _browse_stream_targets(self, all_guilds: list[dict]) -> tuple[str, str]:
         C = self.stream_console
@@ -3959,8 +3979,42 @@ class ApplicationController:
             return "", ""
         return guild_id, channel_id
 
-    def run_gateway_live_streamer(self, hours: float = 0.0) -> None:
-        target = self._choose_stream_target()
+    def _streamer_gate(self) -> str | None:
+        """Warns that the headless streamer may be patched. Returns 'auto' or 'recommend' for the headless
+        streamer, 'manual' once the Watcher was started for a manual stream, or None when the user backs out."""
+        T = self.terminal
+        T.warning("streamer", "The headless streamer may be patched by Discord and can stop working at any time.")
+        T.log("Safer route: Go Live manually in the Discord app on this account, then run the Watcher on an alt account.")
+        print()
+        while True:
+            idx = arrow_menu("Streaming", [
+                "Recommended Stream manually, then start the Watcher",
+                "Use anyways (headless streamer)",
+                "Back to Main menu",
+            ])
+            if idx == 0:
+                self.start_watcher()
+                return "manual"
+            if idx != 1:
+                return None
+            mode = arrow_menu("How should the server be chosen?", [
+                "Recommended Auto select",
+                "Recommend server (pick from the busiest servers)",
+                "Back",
+            ])
+            if mode in (0, 1):
+                if not self._watcher_preflight() and arrow_menu(
+                    "The Watcher cannot start, nothing will watch the stream",
+                    ["Continue without the Watcher (an alt must join the channel)", "Back"],
+                ) != 0:
+                    continue
+                return ("auto", "recommend")[mode]
+
+    def run_gateway_live_streamer(self, hours: float = 0.0, mode: str | None = None) -> None:
+        mode = mode or self._streamer_gate()
+        if mode not in ("auto", "recommend"):
+            return
+        target = self._choose_stream_target(auto=mode == "auto")
         if not target:
             return
         guild_id, channel_id = target
@@ -3975,7 +4029,9 @@ class ApplicationController:
             if proc is not None and proc.poll() is None:
                 proc.terminate()
 
-    def _open_watcher(self, guild_id: str = "", channel_id: str = ""):
+    def _watcher_preflight(self):
+        """Files, account id, a terminal (POSIX) and packages the Watcher needs, installing what is missing.
+        Prints why and returns None when it cannot start, else (account id, terminal command)."""
         C = self.stream_console
         absent = [name for name in WATCHER_FILES if not (WATCHER_DIR / name).is_file()]
         if absent:
@@ -3999,6 +4055,14 @@ class ApplicationController:
                     C.err("watcher", f"could not install {package}, {hint}")
                     return None
                 importlib.invalidate_caches()
+        return target, terminal
+
+    def _open_watcher(self, guild_id: str = "", channel_id: str = ""):
+        C = self.stream_console
+        ready = self._watcher_preflight()
+        if not ready:
+            return None
+        target, terminal = ready
         cmd = [sys.executable, str(WATCHER_SCRIPT), target]
         if guild_id and channel_id:
             cmd += ["--guild", guild_id, "--channel", channel_id]
@@ -4008,15 +4072,17 @@ class ApplicationController:
             launcher = ["sh", "-c", 'cd "$0" && exec "$@"', str(WATCHER_DIR)]
             window = subprocess.Popen(terminal + launcher + cmd, cwd=str(WATCHER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             proc = PosixWatcherProcess(window, cmd)
-        C.ok("watcher", "opened in a new window, it asks for your MAIN account token there once (hidden, saved to Watcher/watcher_session.json)")
+        C.ok("watcher", "opened in a new window, it asks for an ALT account token there once, the alt is the one that watches (hidden, saved to Watcher/watcher_session.json)")
         return proc
 
     def start_watcher(self) -> None:
         T = self.terminal
         T.display_header()
         T.log(f"{T.COLOR_PRIMARY}Start Watcher{T.COLOR_RESET}")
-        T.log("Opens the watcher for your MAIN account. It joins the voice channel of this account and watches its stream.")
-        T.log("The main account must be in the same server. The watcher asks for its token in its own window.")
+        T.log("Opens the watcher on an ALT account. It joins the voice channel of this account and watches its stream.")
+        T.log("The alt must be in the same server as this account. The watcher asks for the alt's token in its own window.")
+        T.log("Go Live on this account in the Discord app, the watcher then finds the stream by itself.")
+        T.log("If it cannot find it within 15s it asks for the server and voice channel ids.")
         self._open_watcher()
         self._pause()
 
