@@ -336,7 +336,7 @@ def load_client_properties(timeout=10):
     return dict(CLIENT_PROPERTIES), "fallback"
 
 
-SUPPORT_INVITE = "QKv6eu9B5F"
+SUPPORT_INVITE = "xTe4a92zh6"
 SUPPORT_MARK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watcher_support.json")
 
 
