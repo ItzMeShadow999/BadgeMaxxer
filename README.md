@@ -72,8 +72,8 @@ The installer pins to a release tag, downloads that release's `SHA256SUMS`, and 
 To pin an exact version, or to read the installer before running it:
 
 ```powershell
-$env:BADGEMAXXER_TAG = "v1.2.6"
-irm https://github.com/ItzMeShadow999/BadgeMaxxer/releases/download/v1.2.6/install.ps1 -OutFile install.ps1
+$env:BADGEMAXXER_TAG = "v1.2.7"
+irm https://github.com/ItzMeShadow999/BadgeMaxxer/releases/download/v1.2.7/install.ps1 -OutFile install.ps1
 notepad install.ps1
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
@@ -81,9 +81,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 On Linux:
 
 ```sh
-curl -fsSLO https://github.com/ItzMeShadow999/BadgeMaxxer/releases/download/v1.2.6/install.sh
+curl -fsSLO https://github.com/ItzMeShadow999/BadgeMaxxer/releases/download/v1.2.7/install.sh
 less install.sh
-BADGEMAXXER_TAG=v1.2.6 sh install.sh
+BADGEMAXXER_TAG=v1.2.7 sh install.sh
 ```
 
 ## Usage
@@ -106,7 +106,7 @@ On first run it asks for your account token and a `cf_clearance` cookie, then sa
 | Game Time | Long sessions on a few games |
 | Game Variety | Short sessions across many games |
 | Streaming | Headless Go Live in a voice channel |
-| Start Watcher | Opens the Watcher for your main account in a new window |
+| Start Watcher | Opens the Watcher on an alt account in a new window |
 | Inspect Discord Profile & Badges | Shows the badges on your profile |
 | Refresh Credentials & Cookie | Updates cookie and analytics token |
 | Configure Executable Fingerprint | Optional, Windows only |
@@ -124,12 +124,12 @@ For stream time to count:
 | File | Purpose |
 |---|---|
 | `BadgeMaxxer.py` | The whole tool |
-| `Watcher/stream_watcher.py` | Watcher entry point, for your main account |
+| `Watcher/stream_watcher.py` | Watcher entry point, for an alt account |
 | `Watcher/watcher_voice.py` | Watcher voice websocket with UDP discovery and DAVE |
 | `Watcher/watcher_common.py` | Watcher constants, redacted debug log, token storage |
 | `requirements.txt` | Python packages: `websockets`, `davey`, `cryptography` |
 | `session.json` | Token, cookie, fingerprint and totals (created on first run) |
-| `Watcher/watcher_session.json` | Main account token for the Watcher (created on first Watcher run) |
+| `Watcher/watcher_session.json` | Alt account token for the Watcher (created on first Watcher run) |
 | `../data/games.json` | Cached games catalog from `cdn.discordapp.com/detectables/games.json`. Delete it to refresh. |
 
 ## Notes
