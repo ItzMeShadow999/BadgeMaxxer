@@ -2,9 +2,9 @@
 """
 stream_watcher.py
 
-Script for the MAIN account. It logs in with the main account token, finds the
-voice channel of the account that is Go Live streaming (the BadgeMaxxer
-account), joins it with a real voice connection and opens a viewer connection
+Script for an ALT account. It logs in with the alt account token, finds the
+voice channel of the account that is Go Live streaming (the main account, the
+one BadgeMaxxer uses), joins it with a real voice connection and opens a viewer connection
 on their stream. Voice and stream connections use Discord's end-to-end
 encryption (DAVE) through the "davey" library.
 
@@ -20,9 +20,10 @@ Built to keep going:
   * waits for the target to go live and re-watches when the stream restarts
   * writes a redacted debug log (watcher_debug.log) you can paste when asked
 
-Token handling: read from the DISCORD_MAIN_TOKEN environment variable, else
-from watcher_session.json (saved on first run), else typed at a hidden prompt
-and saved there. A token from the environment variable is never saved. The
+Token handling: read from the DISCORD_ALT_TOKEN environment variable (the old
+DISCORD_MAIN_TOKEN name still works), else from watcher_session.json (saved on
+first run), else typed at a hidden prompt and saved there. A token from the
+environment variable is never saved. The
 token is never written to the debug log, and is deliberately NOT read from
 BadgeMaxxer's session.json (that file holds the other account's token). A
 rejected token (4004) is deleted automatically; --reset-token forgets it.
@@ -70,6 +71,7 @@ from watcher_common import (
     join_support_server,
     load_client_properties,
     log,
+    token_user_id,
     wait_all,
     wait_any,
     websockets,
@@ -328,6 +330,9 @@ class StreamWatcher:
         elif name == "RESUMED":
             self.connected.set()
             log("Gateway session resumed.")
+        elif name == "READY_SUPPLEMENTAL":
+            for guild in d.get("guilds", []):
+                self.scan_guild(guild)
         elif name == "GUILD_CREATE":
             self.scan_guild(d)
         elif name == "VOICE_STATE_UPDATE":
@@ -407,7 +412,7 @@ class StreamWatcher:
         await asyncio.sleep(LOCATE_WAIT_SECONDS)
         if self.target_loc:
             return
-        log("Could not find that user in any voice channel the main account can see.")
+        log("Could not find that user in any voice channel the alt account can see.")
         print("Enter the guild ID and voice channel ID manually, or press Enter to keep waiting.")
         try:
             guild_id = (await async_input("Guild ID: ")).strip()
@@ -631,7 +636,7 @@ class StreamWatcher:
 
 
 def parse_args():
-    ap = argparse.ArgumentParser(description="Watch a Go Live stream from the main account.")
+    ap = argparse.ArgumentParser(description="Watch a Go Live stream from an alt account.")
     ap.add_argument("user_id", nargs="?", help="user ID of the account that is streaming")
     ap.add_argument("--guild", help="guild ID (skips auto-detection)")
     ap.add_argument("--channel", help="voice channel ID (skips auto-detection)")
@@ -643,7 +648,7 @@ def parse_args():
 
 
 async def main(args):
-    print("Stream watcher (main account)")
+    print("Stream watcher (alt account)")
     DBG.open(args.log)
     target_id = args.user_id
     if not target_id or not target_id.isdigit():
@@ -654,6 +659,14 @@ async def main(args):
     if args.reset_token:
         forget_token()
     token = get_token()
+    for _ in range(3):
+        if token_user_id(token) != target_id:
+            break
+        print("That token belongs to the account being watched. The watcher needs the token of a different (alt) account.")
+        forget_token()
+        token = get_token(fresh=True)
+    else:
+        raise SystemExit("Still the same account as the one being watched, stopping.")
     join_support_server(token)
     watcher = StreamWatcher(token, target_id, max_attempts=max(1, args.max_attempts), preset=preset)
     log("Connecting to the gateway.")
