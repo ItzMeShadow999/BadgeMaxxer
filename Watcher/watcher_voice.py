@@ -184,25 +184,28 @@ class VoiceLink:
 
     def discover_blocking(self, ip, port):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(5)
-        sock.connect((ip, port))
-        packet = bytearray(74)
-        struct.pack_into(">H", packet, 0, 1)
-        struct.pack_into(">H", packet, 2, 70)
-        struct.pack_into(">I", packet, 4, self.ssrc)
-        for _ in range(3):
-            sock.send(bytes(packet))
-            try:
-                reply = sock.recv(2048)
-            except socket.timeout:
-                continue
-            if len(reply) == 74 and reply[1] == 2:
-                my_ip = reply[8:reply.index(0, 8)].decode("ascii")
-                my_port = struct.unpack_from(">H", reply, 72)[0]
-                sock.setblocking(False)
-                return sock, my_ip, my_port
-        sock.close()
-        raise socket.timeout("no reply to UDP discovery")
+        try:
+            sock.settimeout(5)
+            sock.connect((ip, port))
+            packet = bytearray(74)
+            struct.pack_into(">H", packet, 0, 1)
+            struct.pack_into(">H", packet, 2, 70)
+            struct.pack_into(">I", packet, 4, self.ssrc)
+            for _ in range(3):
+                sock.send(bytes(packet))
+                try:
+                    reply = sock.recv(2048)
+                except socket.timeout:
+                    continue
+                if len(reply) == 74 and reply[1] == 2:
+                    my_ip = reply[8:reply.index(0, 8)].decode("ascii")
+                    my_port = struct.unpack_from(">H", reply, 72)[0]
+                    sock.setblocking(False)
+                    return sock, my_ip, my_port
+            raise socket.timeout("no reply to UDP discovery")
+        except BaseException:
+            sock.close()
+            raise
 
     async def on_ready(self, data):
         self.ssrc = data["ssrc"]
