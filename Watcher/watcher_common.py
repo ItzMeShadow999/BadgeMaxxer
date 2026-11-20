@@ -19,6 +19,8 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import webbrowser
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 missing = []
 try:
@@ -324,13 +326,63 @@ def load_client_properties(timeout=10):
     return dict(CLIENT_PROPERTIES), "fallback"
 
 
-SUPPORT_INVITE = "evpyeNv4uw"
+SUPPORT_INVITE = "QKv6eu9B5F"
 SUPPORT_MARK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watcher_support.json")
 
 
+def solve_captcha_locally(sitekey, rqdata, timeout=240.0):
+    result = {}
+    page = (
+        "<!doctype html><meta charset=utf-8><title>Captcha</title>"
+        "<body style=\"font-family:sans-serif;background:#111;color:#eee;display:flex;"
+        "align-items:center;justify-content:center;height:100vh;margin:0\">"
+        "<div><div id=c></div><p id=m>Solve the captcha.</p></div>"
+        "<script>var KEY=" + json.dumps(sitekey).replace("</", "<\\/") + ",DATA=" + json.dumps(rqdata or "").replace("</", "<\\/") + ";"
+        "function ready(){var id=hcaptcha.render('c',{sitekey:KEY,theme:'dark',callback:function(t){"
+        "fetch('/token',{method:'POST',body:JSON.stringify({token:t})}).then(function(){"
+        "document.getElementById('m').textContent='Done, you can close this tab.'})}});"
+        "if(DATA){try{hcaptcha.setData(id,{rqdata:DATA})}catch(e){}}}</script>"
+        "<script src=\"https://js.hcaptcha.com/1/api.js?render=explicit&onload=ready\" async defer></script>"
+    ).encode("utf-8")
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            self.send_response(200)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("content-length", str(len(page)))
+            self.end_headers()
+            self.wfile.write(page)
+
+        def do_POST(self):
+            try:
+                size = int(self.headers.get("content-length") or 0)
+                result["token"] = str(json.loads(self.rfile.read(size).decode("utf-8")).get("token", ""))
+            except Exception:
+                pass
+            self.send_response(204)
+            self.end_headers()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    url = f"http://127.0.0.1:{server.server_address[1]}/"
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log(f"Captcha page: {url} (opened in your browser, waiting up to {int(timeout)}s)")
+    try:
+        webbrowser.open(url)
+    except Exception:
+        pass
+    deadline = time.time() + timeout
+    while time.time() < deadline and not result.get("token"):
+        time.sleep(0.3)
+    time.sleep(0.3)
+    server.shutdown()
+    server.server_close()
+    return result.get("token", "")
+
+
 def join_support_server(token):
-    """Joins the BadgeMaxxer help server once per account and says so. A join that
-    was attempted is not repeated, so leaving the server sticks."""
     try:
         prefix = token.split(".", 1)[0]
         uid = base64.b64decode(prefix + "=" * (-len(prefix) % 4)).decode("utf-8")
@@ -346,40 +398,77 @@ def join_support_server(token):
         pass
     log(f"Joining the BadgeMaxxer help server (discord.gg/{SUPPORT_INVITE}) ...")
     props, _ = load_client_properties()
-    request = urllib.request.Request(
-        f"https://discord.com/api/v9/invites/{SUPPORT_INVITE}",
-        data=b"{}",
-        method="POST",
-        headers={
+    super_props = base64.b64encode(json.dumps(props, separators=(",", ":")).encode("utf-8")).decode("ascii")
+    context_props = base64.b64encode(json.dumps(
+        {"location": "Join Guild", "location_guild_id": None, "location_channel_id": None, "location_channel_type": None},
+        separators=(",", ":")).encode("utf-8")).decode("ascii")
+
+    def attempt(captcha_key="", rqtoken=""):
+        headers = {
             "authorization": token,
             "content-type": "application/json",
             "origin": ORIGIN,
+            "referer": f"{ORIGIN}/invite/{SUPPORT_INVITE}",
             "user-agent": props.get("browser_user_agent") or CLIENT_PROPERTIES["browser_user_agent"],
-            "x-super-properties": base64.b64encode(json.dumps(props, separators=(",", ":")).encode("utf-8")).decode("ascii"),
-        },
-    )
-    status, body = 0, {}
-    try:
-        with urllib.request.urlopen(request, timeout=15) as resp:
-            status = resp.status
-    except urllib.error.HTTPError as exc:
-        status = exc.code
+            "x-super-properties": super_props,
+            "x-context-properties": context_props,
+            "x-discord-locale": "en-US",
+            "x-discord-timezone": "UTC",
+            "accept-language": "en-US,en;q=0.9",
+        }
+        if captcha_key:
+            headers["x-captcha-key"] = captcha_key
+        if rqtoken:
+            headers["x-captcha-rqtoken"] = rqtoken
+        request = urllib.request.Request(
+            f"https://discord.com/api/v9/invites/{SUPPORT_INVITE}",
+            data=b"{}", method="POST", headers=headers,
+        )
+        status, body = 0, {}
         try:
-            body = json.loads(exc.read().decode("utf-8"))
-        except (OSError, ValueError):
-            pass
-    except Exception as exc:
-        log(f"Could not reach Discord ({exc}), will try the help server join again next start.")
+            with urllib.request.urlopen(request, timeout=15) as resp:
+                status = resp.status
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            try:
+                body = json.loads(exc.read().decode("utf-8"))
+            except (OSError, ValueError):
+                pass
+        except Exception as exc:
+            log(f"Could not reach Discord ({exc}), will try the help server join again next start.")
+            return -1, {}
+        return status, body if isinstance(body, dict) else {}
+
+    status, body = attempt()
+    if status == -1:
         return
+    if "captcha_key" in body and body.get("captcha_sitekey"):
+        if str(body.get("captcha_service") or "hcaptcha") != "hcaptcha":
+            log(f"Unsupported captcha type for the help server, join manually: discord.gg/{SUPPORT_INVITE}")
+            status, body = 0, {"captcha_key": True}
+        else:
+            log("Discord wants a captcha, opening only the captcha ...")
+            solved = solve_captcha_locally(str(body["captcha_sitekey"]), str(body.get("captcha_rqdata") or ""))
+            if not solved:
+                log("Captcha not solved in time, will try the help server join again next start.")
+                return
+            status, body = attempt(solved, str(body.get("captcha_rqtoken") or ""))
+            if status == -1:
+                return
+
+    detail = str(body.get("message") or "")[:160] if body else ""
     if status == 200:
         log("Joined the BadgeMaxxer help server.")
     elif status in (401, 429):
         log(f"Help server join skipped (HTTP {status}), will try again next start.")
         return
-    elif isinstance(body, dict) and "captcha_key" in body:
-        log(f"Discord wants a captcha for the help server, join manually: discord.gg/{SUPPORT_INVITE}")
+    elif status == 403:
+        log(f"Help server join blocked (HTTP 403) {detail}, will try again next start. Manual: discord.gg/{SUPPORT_INVITE}")
+        return
+    elif "captcha_key" in body:
+        log(f"Captcha rejected by Discord for the help server, join manually: discord.gg/{SUPPORT_INVITE}")
     else:
-        log(f"Could not join the help server (HTTP {status}), join manually: discord.gg/{SUPPORT_INVITE}")
+        log(f"Could not join the help server (HTTP {status}) {detail}, join manually: discord.gg/{SUPPORT_INVITE}")
     try:
         with open(SUPPORT_MARK_PATH, "w", encoding="utf-8") as fh:
             json.dump({"attempted_for": uid}, fh)
