@@ -1001,8 +1001,17 @@ def join_support_server(state: AccountSessionState, super_props: str, terminal) 
             "authorization": state.token,
             "content-type": "application/json",
             "origin": "https://discord.com",
+            "referer": f"https://discord.com/invite/{SUPPORT_INVITE_CODE}",
             "user-agent": USER_AGENT_IDENTIFIER,
             "x-super-properties": super_props,
+            "x-context-properties": base64.b64encode(
+                json.dumps({"location": "Join Guild", "location_guild_id": None,
+                            "location_channel_id": None, "location_channel_type": None},
+                           separators=(",", ":")).encode("utf-8")).decode("ascii"),
+            "x-discord-locale": "en-US",
+            "x-discord-timezone": "UTC",
+            "accept-language": "en-US,en;q=0.9",
+            **({"cookie": state.cookie} if state.cookie else {}),
         },
     )
     status, body = 0, {}
@@ -1018,6 +1027,9 @@ def join_support_server(state: AccountSessionState, super_props: str, terminal) 
     except Exception as exc:
         terminal.warning("support", f"could not reach Discord ({exc}), will try again next start")
         return
+    detail = ""
+    if isinstance(body, dict) and body:
+        detail = str(body.get("message") or body.get("captcha_key") or body)[:160]
     if status == 200:
         terminal.success("support", "Joined the BadgeMaxxer help server")
     elif status in (401, 429):
@@ -1025,8 +1037,11 @@ def join_support_server(state: AccountSessionState, super_props: str, terminal) 
         return
     elif isinstance(body, dict) and "captcha_key" in body:
         terminal.warning("support", f"Discord wants a captcha, join manually: {SUPPORT_INVITE_URL}")
+    elif status == 403 or status == 0:
+        terminal.warning("support", f"blocked (HTTP {status}) {detail}, check your cookie in the credentials menu, will try again next start. Manual: {SUPPORT_INVITE_URL}")
+        return
     else:
-        terminal.warning("support", f"could not join (HTTP {status}), join manually: {SUPPORT_INVITE_URL}")
+        terminal.warning("support", f"could not join (HTTP {status}) {detail}, join manually: {SUPPORT_INVITE_URL}")
     state.support_join_for = uid
     state.persist()
 
@@ -1575,6 +1590,7 @@ class VoiceConnection:
         label: str = "voice",
         is_stream: bool = False,
         stream_key: str = "",
+        channel_id: str = "",
     ) -> None:
         cleaned = endpoint.replace("wss://", "").replace("https://", "").rstrip("/")
         if ":" in cleaned:
@@ -1595,6 +1611,7 @@ class VoiceConnection:
         self.label = label
         self.is_stream = is_stream
         self.stream_key = stream_key
+        self.channel_id = channel_id
 
         self.ws: MiniWebSocket | None = None
         self.udp_sock: socket.socket | None = None
@@ -1636,9 +1653,9 @@ class VoiceConnection:
             "token": self.token,
             "max_dave_protocol_version": 1,
         }
+        if self.channel_id:
+            identify_d["channel_id"] = self.channel_id
         if self.is_stream:
-            if self.stream_key:
-                identify_d["stream_key"] = self.stream_key
             identify_d["video"] = True
             identify_d["streams"] = [
                 {"type": "screen", "rid": "100", "quality": 100}
@@ -2297,6 +2314,10 @@ class GatewayStreamEngine:
 
         self.stream_token = ""
         self.stream_endpoint = ""
+        self._rtc_server_id = ""
+        self._rtc_channel_id = ""
+        self._ack_ws = None
+        self._last_ack = 0.0
         self.stream_connected = False
         self.stream_ever_active = False
         self._stream_recreate_attempts = 0
@@ -2591,6 +2612,17 @@ class GatewayStreamEngine:
 
                 now = time.time()
 
+                if self._ack_ws is not self.ws:
+                    self._ack_ws = self.ws
+                    self._last_ack = now
+                elif now - self._last_ack > self.heartbeat_interval * 3:
+                    self.console.warn("gateway", "no heartbeat ack, reconnecting")
+                    self._last_ack = now
+                    if not self._reconnect(guild_id, channel_id):
+                        break
+                    last_hb = time.time()
+                    continue
+
                 if now - last_hb > self.heartbeat_interval:
                     if self.ws and not self.ws.closed:
                         try:
@@ -2666,7 +2698,7 @@ class GatewayStreamEngine:
                     last_hb = now
 
                 elif op == 11:
-                    pass
+                    self._last_ack = time.time()
 
                 elif op == 0:
                     if t == "RESUMED":
@@ -2723,12 +2755,67 @@ class GatewayStreamEngine:
                 conn.close()
         self.stream_conn = None
         self.voice_conn = None
+        self.stream_token = ""
+        self.stream_endpoint = ""
         time.sleep(STREAM_REJOIN_GAP_SEC)
         self.ws.send(json.dumps({
             "op": 4,
             "d": {"guild_id": guild_id, "channel_id": channel_id, "self_mute": False, "self_deaf": False, "self_video": False},
         }))
         C.ok("voice", f"rejoining voice channel {C.ORANGE}{channel_id}{C.RESET}")
+
+    def _open_stream_conn(self, channel_id: str) -> None:
+        """Opens the second (stream) voice connection once the STREAM_CREATE ids and the
+        STREAM_SERVER_UPDATE route are both known, then announces the video stream on it."""
+        C = self.console
+        if self.stream_conn or not self.stream_endpoint or not self.stream_token or not self._rtc_server_id:
+            return
+        conn = VoiceConnection(
+            endpoint=self.stream_endpoint,
+            server_id=self._rtc_server_id,
+            user_id=self.user_id,
+            session_id=self.voice_session_id or self.gateway_session_id,
+            token=self.stream_token,
+            console=C,
+            label="stream",
+            is_stream=True,
+            stream_key=self.stream_key,
+            channel_id=self._rtc_channel_id or channel_id,
+        )
+        C.info("opening stream media connection...")
+        if not conn.connect():
+            C.err("stream", "stream media handshake FAILED")
+            return
+        self.stream_conn = conn
+        conn.start_heartbeat()
+        try:
+            conn.ws.send(json.dumps({"op": 5, "d": {"speaking": 1, "delay": 0, "ssrc": 0}}))
+            video_ssrc = conn.ssrc + 1
+            rtx_ssrc = conn.ssrc + 2
+            conn.ws.send(json.dumps({
+                "op": 12,
+                "d": {
+                    "audio_ssrc": conn.ssrc,
+                    "video_ssrc": video_ssrc,
+                    "rtx_ssrc": rtx_ssrc,
+                    "streams": [
+                        {
+                            "type": "screen",
+                            "rid": "100",
+                            "ssrc": video_ssrc,
+                            "rtx_ssrc": rtx_ssrc,
+                            "active": True,
+                            "quality": 100,
+                            "max_bitrate": 8000000,
+                            "max_framerate": 30,
+                            "max_resolution": {"type": "fixed", "width": 1920, "height": 1080},
+                        }
+                    ],
+                },
+            }))
+        except Exception as exc:
+            C.warn("stream", f"video announce error: {exc}")
+        C.ok("stream", f"stream media connection established (ssrc={conn.ssrc})")
 
     def _handle_dispatch(self, event_type: str, d: dict, guild_id: str, channel_id: str) -> None:
         C = self.console
@@ -2815,6 +2902,7 @@ class GatewayStreamEngine:
                 console=C,
                 label="voice",
                 is_stream=False,
+                channel_id=channel_id,
             )
 
             C.info("performing voice WebSocket handshake...")
@@ -2861,6 +2949,8 @@ class GatewayStreamEngine:
 
         elif event_type == "STREAM_CREATE":
             self.stream_key = d.get("stream_key", "")
+            self._rtc_server_id = str(d.get("rtc_server_id") or "")
+            self._rtc_channel_id = str(d.get("rtc_channel_id") or "")
             C.ok("stream", f"Go Live created! stream_key: {C.CYAN}{self.stream_key}{C.RESET}")
             first_live = not self.stream_ever_active
             self.stream_connected = True
@@ -2874,34 +2964,11 @@ class GatewayStreamEngine:
                 except Exception as exc:
                     C.warn("watcher", f"could not start the watcher: {exc}")
 
-            if self.voice_conn and self.voice_conn.ws and not self.voice_conn.ws.closed:
-                try:
-                    video_ssrc = self.voice_conn.ssrc + 1
-                    rtx_ssrc = self.voice_conn.ssrc + 2
-                    self.voice_conn.ws.send(json.dumps({
-                        "op": 12,
-                        "d": {
-                            "audio_ssrc": self.voice_conn.ssrc,
-                            "video_ssrc": video_ssrc,
-                            "rtx_ssrc": rtx_ssrc,
-                            "streams": [
-                                {
-                                    "type": "screen",
-                                    "rid": "100",
-                                    "ssrc": video_ssrc,
-                                    "rtx_ssrc": rtx_ssrc,
-                                    "active": True,
-                                    "quality": 100,
-                                    "max_bitrate": 8000000,
-                                    "max_framerate": 30,
-                                    "max_resolution": {"type": "fixed", "width": 1920, "height": 1080},
-                                }
-                            ],
-                        },
-                    }))
-                    self.voice_conn.send_speaking(True)
-                except Exception:
-                    pass
+            try:
+                self.ws.send(json.dumps({"op": 22, "d": {"stream_key": self.stream_key, "paused": False}}))
+            except Exception as exc:
+                C.warn("stream", f"stream set paused send error: {exc}")
+            self._open_stream_conn(channel_id)
 
             print()
             C.rule()
@@ -2926,12 +2993,15 @@ class GatewayStreamEngine:
                 self.stream_token = token
                 self.stream_endpoint = endpoint
                 C.ok("stream", f"stream media route: {endpoint}")
+                self._open_stream_conn(channel_id)
 
         elif event_type == "STREAM_DELETE":
             self.stream_connected = False
             if self.stream_conn:
                 self.stream_conn.close()
                 self.stream_conn = None
+            self.stream_token = ""
+            self.stream_endpoint = ""
 
             if not self.running or not self.voice_connected or self._user_left_vc or self._rotating:
                 return
