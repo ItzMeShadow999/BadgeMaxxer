@@ -255,6 +255,9 @@ class StreamWatcher:
                     elif op == 0:
                         await self.dispatch(msg.get("t"), msg.get("d") or {})
                 return "closed"
+            except asyncio.CancelledError:
+                await self.leave_voice()
+                raise
             except websockets.ConnectionClosed as exc:
                 code = close_code(exc)
                 log(f"Gateway closed the connection: {code} "
@@ -272,6 +275,21 @@ class StreamWatcher:
                     hb.cancel()
                 self.connected.clear()
                 self.ws = None
+
+    async def leave_voice(self):
+        if self.ws is None:
+            return
+        try:
+            if self.stream_key:
+                await asyncio.wait_for(self.send_raw(19, {"stream_key": self.stream_key}), 2)
+            if self.joined_channel:
+                await asyncio.wait_for(self.send_raw(4, {"guild_id": self.joined_channel[0],
+                                                         "channel_id": None, "self_mute": True,
+                                                         "self_deaf": False, "self_video": False}), 2)
+        except Exception:
+            pass
+        self.stream_key = None
+        self.joined_channel = None
 
     async def cleanup(self):
         await self.teardown(pause=0)
@@ -466,13 +484,14 @@ class StreamWatcher:
                 DBG.write("trace", traceback.format_exc())
                 outcome = ("failed", f"unexpected error {exc!r}", None, None)
             held = time.time() - started
+            if outcome[0] == "ended":
+                self.live_event.clear()
             await self.teardown()
 
             if outcome[0] in ("ended", "cycle"):
                 attempts = 0
                 if outcome[0] == "ended":
                     log("Stream ended. Waiting for the target to go live again.")
-                    self.live_event.clear()
                 continue
 
             _, reason, which, code = outcome
@@ -590,9 +609,10 @@ class StreamWatcher:
         return ("cycle",)
 
     async def teardown(self, pause=TEARDOWN_PAUSE):
-        if self.stream_key:
+        can_send = self.connected.is_set() or bool(pause)
+        if self.stream_key and can_send:
             await self.try_send(19, {"stream_key": self.stream_key})
-        if self.joined_channel:
+        if self.joined_channel and can_send:
             await self.try_send(4, {"guild_id": self.joined_channel[0], "channel_id": None,
                                     "self_mute": True, "self_deaf": False, "self_video": False})
         for link in (self.stream_link, self.main_link):
