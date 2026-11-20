@@ -267,6 +267,9 @@ class StreamWatcher:
                 elif code in (4007, 4009):
                     self.session_id = self.seq = self.resume_url = None
                 return f"closed {code}"
+            except asyncio.CancelledError:
+                await self.teardown(pause=0)
+                raise
             finally:
                 if hb:
                     hb.cancel()
@@ -345,6 +348,9 @@ class StreamWatcher:
         if self.supervisor:
             self.supervisor.cancel()
             self.supervisor = None
+        for link in (self.stream_link, self.main_link):
+            if link and link.task:
+                link.task.cancel()
         self.reset_attempt_state()
         self.voice_session_id = None
 
@@ -466,13 +472,14 @@ class StreamWatcher:
                 DBG.write("trace", traceback.format_exc())
                 outcome = ("failed", f"unexpected error {exc!r}", None, None)
             held = time.time() - started
+            if outcome[0] == "ended":
+                self.live_event.clear()
             await self.teardown()
 
             if outcome[0] in ("ended", "cycle"):
                 attempts = 0
                 if outcome[0] == "ended":
                     log("Stream ended. Waiting for the target to go live again.")
-                    self.live_event.clear()
                 continue
 
             _, reason, which, code = outcome

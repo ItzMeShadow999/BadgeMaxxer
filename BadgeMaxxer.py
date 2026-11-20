@@ -1498,9 +1498,10 @@ class MiniWebSocket:
         if self.closed or not self.sock:
             return None
         try:
-            r, _, _ = select.select([self.sock], [], [], timeout)
-            if not r:
-                return None
+            if not (isinstance(self.sock, ssl.SSLSocket) and self.sock.pending()):
+                r, _, _ = select.select([self.sock], [], [], timeout)
+                if not r:
+                    return None
             head = self._recv_exact(2)
         except Exception:
             self.close()
@@ -3167,7 +3168,7 @@ def github_device_login(T: "TerminalInterface") -> str:
                   "grant_type": "urn:ietf:params:oauth:grant-type:device_code"},
             accept="application/json",
         )
-        if st == 0:
+        if st == 0 or st == 429 or st >= 500:
             continue
         if isinstance(r, dict) and r.get("access_token"):
             return str(r["access_token"])

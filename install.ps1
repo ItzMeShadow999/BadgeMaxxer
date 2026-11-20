@@ -84,12 +84,15 @@ function Install-BadgeMaxxer {
             if (-not $expected.ContainsKey($file)) { throw "no checksum listed for $file in SHA256SUMS" }
             if ($actual -ne $expected[$file]) { throw "checksum mismatch (expected $($expected[$file]), got $actual)" }
             Write-Ok "Verified $file (sha256 $($actual.Substring(0, 16))...)"
-            Move-Item -Force -Path $temp -Destination $target
         } catch {
-            Remove-Item -Force -ErrorAction SilentlyContinue $temp
+            foreach ($f in $Files) { Remove-Item -Force -ErrorAction SilentlyContinue ((Join-Path $Dir ($f -replace "/", "\")) + ".download") }
             Write-Bad "Could not install $file : $($_.Exception.Message)"
             return
         }
+    }
+    foreach ($file in $Files) {
+        $target = Join-Path $Dir ($file -replace "/", "\")
+        Move-Item -Force -Path "$target.download" -Destination $target
     }
     Write-Ok "Files saved to $Dir (your session.json is never touched)"
 
