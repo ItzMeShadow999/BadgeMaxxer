@@ -124,6 +124,7 @@ For stream time to count:
 | File | Purpose |
 |---|---|
 | `BadgeMaxxer.py` | The whole tool |
+| `lib/secret_store.py` | Keeps tokens out of plaintext: Windows DPAPI, Linux desktop keyring. The `lib/` folder must sit next to `BadgeMaxxer.py` |
 | `Watcher/stream_watcher.py` | Watcher entry point, for an alt account |
 | `Watcher/watcher_voice.py` | Watcher voice websocket with UDP discovery and DAVE |
 | `Watcher/watcher_common.py` | Watcher constants, redacted debug log, token storage |
@@ -135,7 +136,8 @@ For stream time to count:
 ## Notes
 
 - Badge progress usually syncs within 24 to 48 hours.
-- `session.json` holds your token and cookie in plaintext. Never share or commit it.
+- `session.json` and `Watcher/watcher_session.json` keep the Discord tokens, cookie, analytics token, GitHub token and fingerprint encrypted with Windows DPAPI (tied to your Windows user) or in the Linux desktop keyring (needs `secret-tool` from libsecret). On Windows the files are also locked to your user with an ACL. Without `secret-tool` on Linux they fall back to plaintext with mode 0600 and a warning. Old plaintext files are migrated on the next start. This does not stop a program already running as you from asking for the secrets. Never share or commit these files.
+- The GitHub login is only used to check your star and follow, and requests no scopes (public read only). To revoke it, remove the app under GitHub Settings > Applications.
 - `Watcher/watcher_session.json` and `Watcher/watcher_debug.log` are git-ignored. Do not commit them.
 - The Watcher needs all three files in `Watcher/`. A release must contain them, or the installers stop with "no checksum listed".
 

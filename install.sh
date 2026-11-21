@@ -6,7 +6,7 @@ REPO="badgemaxxer"
 TAG="${BADGEMAXXER_TAG:-}"
 RELEASES="https://github.com/$OWNER/$REPO/releases"
 DIR="$HOME/BadgeMaxxer"
-FILES="BadgeMaxxer.py Watcher/stream_watcher.py Watcher/watcher_voice.py Watcher/watcher_common.py"
+FILES="BadgeMaxxer.py lib/secret_store.py Watcher/stream_watcher.py Watcher/watcher_voice.py Watcher/watcher_common.py"
 PACKAGES="websockets davey cryptography"
 
 if [ -t 1 ]; then
@@ -84,7 +84,7 @@ install_badgemaxxer() {
         return 1
     fi
 
-    if ! mkdir -p "$DIR/Watcher"; then
+    if ! mkdir -p "$DIR/Watcher" "$DIR/lib"; then
         bad "Could not create $DIR"
         return 1
     fi

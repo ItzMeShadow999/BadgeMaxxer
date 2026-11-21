@@ -3,7 +3,7 @@ $Repo   = "badgemaxxer"
 $Tag    = $env:BADGEMAXXER_TAG
 $Releases = "https://github.com/$Owner/$Repo/releases"
 $Dir    = Join-Path $env:USERPROFILE "BadgeMaxxer"
-$Files  = @("BadgeMaxxer.py", "Watcher/stream_watcher.py", "Watcher/watcher_voice.py", "Watcher/watcher_common.py")
+$Files  = @("BadgeMaxxer.py", "lib/secret_store.py", "Watcher/stream_watcher.py", "Watcher/watcher_voice.py", "Watcher/watcher_common.py")
 $Packages = @("websockets", "davey", "cryptography")
 
 function Write-Step($text) { Write-Host "  $text" -ForegroundColor Yellow }
@@ -73,6 +73,7 @@ function Install-BadgeMaxxer {
 
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $Dir "Watcher") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $Dir "lib") | Out-Null
 
     foreach ($file in $Files) {
         $target = Join-Path $Dir ($file -replace "/", "\")
