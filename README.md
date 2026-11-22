@@ -72,8 +72,8 @@ The installer pins to a release tag, downloads that release's `SHA256SUMS`, and 
 To pin an exact version, or to read the installer before running it:
 
 ```powershell
-$env:BADGEMAXXER_TAG = "v1.2.8"
-irm https://github.com/ItzMeShadow999/BadgeMaxxer/releases/download/v1.2.8/install.ps1 -OutFile install.ps1
+$env:BADGEMAXXER_TAG = "v1.2.9"
+irm https://github.com/ItzMeShadow999/BadgeMaxxer/releases/download/v1.2.9/install.ps1 -OutFile install.ps1
 notepad install.ps1
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
@@ -81,9 +81,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 On Linux:
 
 ```sh
-curl -fsSLO https://github.com/ItzMeShadow999/BadgeMaxxer/releases/download/v1.2.8/install.sh
+curl -fsSLO https://github.com/ItzMeShadow999/BadgeMaxxer/releases/download/v1.2.9/install.sh
 less install.sh
-BADGEMAXXER_TAG=v1.2.8 sh install.sh
+BADGEMAXXER_TAG=v1.2.9 sh install.sh
 ```
 
 ## Usage
