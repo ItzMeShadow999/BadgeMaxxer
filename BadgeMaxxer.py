@@ -449,13 +449,54 @@ def zoom_out_terminal() -> None:
                 keybd(0xBD, 0, 0, 0)
                 keybd(0xBD, 0, 2, 0)
                 keybd(0x11, 0, 2, 0)
-                time.sleep(0.25)
+                time.sleep(0.08)
                 if banner_fits():
                     break
-            time.sleep(0.3)
+            time.sleep(0.1)
         else:
             cols, rows = shutil.get_terminal_size((120, 30))
             os.system(f"mode con: cols={max(cols, BANNER.art_width + 2)} lines={max(rows, BANNER.MIN_ROWS_FULL + 1)}")
+    except Exception:
+        pass
+
+
+TERMINAL_ZOOM_IN_MAX = 30
+
+
+def _wt_zoom(vk: int) -> bool:
+    import ctypes
+    keybd = ctypes.windll.user32.keybd_event
+    before = shutil.get_terminal_size((120, 30))
+    keybd(0x11, 0, 0, 0)
+    keybd(vk, 0, 0, 0)
+    keybd(vk, 0, 2, 0)
+    keybd(0x11, 0, 2, 0)
+    for _ in range(50):
+        time.sleep(0.01)
+        if shutil.get_terminal_size((120, 30)) != before:
+            time.sleep(0.04)
+            return True
+    return False
+
+
+def fit_terminal_zoom() -> None:
+    if os.name != "nt" or not sys.stdout.isatty() or not os.environ.get("WT_SESSION"):
+        zoom_out_terminal()
+        return
+    try:
+        for _ in range(TERMINAL_ZOOM_OUT_MAX):
+            if banner_fits():
+                break
+            if not _wt_zoom(0xBD):
+                break
+        if banner_fits():
+            for _ in range(TERMINAL_ZOOM_IN_MAX):
+                if not _wt_zoom(0xBB):
+                    break
+                if not banner_fits():
+                    _wt_zoom(0xBD)
+                    break
+        time.sleep(0.05)
     except Exception:
         pass
 
@@ -3374,7 +3415,7 @@ class ApplicationController:
         return True
 
     def start(self) -> None:
-        zoom_out_terminal()
+        fit_terminal_zoom()
         self.terminal.display_header()
         time.sleep(0.3)
 
