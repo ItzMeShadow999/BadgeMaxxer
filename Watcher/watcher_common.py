@@ -22,6 +22,12 @@ import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lib"))
+try:
+    import secret_store
+except ImportError:
+    sys.exit("lib/secret_store.py is missing next to BadgeMaxxer.py (one folder up). Re-run the installer to get all files.")
+
 missing = []
 try:
     import websockets
@@ -250,21 +256,27 @@ TOKEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "watcher_s
 def load_saved_token():
     try:
         with open(TOKEN_PATH, encoding="utf-8") as fh:
-            return str(json.load(fh).get("token", "")).strip()
+            stored = str(json.load(fh).get("token", "")).strip()
     except (OSError, ValueError, AttributeError):
         return ""
+    token = secret_store.reveal("watcher_token", stored).strip()
+    if token and not secret_store.is_protected(stored) and secret_store.available():
+        save_token(token)
+    return token
 
 
 def save_token(token):
+    payload = {"token": secret_store.protect("watcher_token", token)}
     try:
         if os.name == "nt":
+            secret_store.restrict_file(TOKEN_PATH)
             with open(TOKEN_PATH, "w", encoding="utf-8") as fh:
-                json.dump({"token": token}, fh, indent=2)
+                json.dump(payload, fh, indent=2)
         else:
             fd = os.open(TOKEN_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 os.fchmod(fh.fileno(), 0o600)
-                json.dump({"token": token}, fh, indent=2)
+                json.dump(payload, fh, indent=2)
     except OSError as exc:
         print(f"Could not save the token ({exc}).")
         return
@@ -275,6 +287,7 @@ def save_token(token):
 
 
 def forget_token():
+    secret_store.discard("watcher_token")
     try:
         os.remove(TOKEN_PATH)
     except OSError:

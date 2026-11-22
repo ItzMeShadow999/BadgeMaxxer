@@ -32,6 +32,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterator, Sequence
 
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "lib"))
+try:
+    import secret_store
+except ImportError:
+    sys.exit("lib/secret_store.py is missing next to BadgeMaxxer.py. Re-run the installer to get all files.")
+
+SECRET_FIELDS = ("token", "cookie", "analytics_token", "github_token", "fingerprint")
+
 SYSTEM_PYTHON_POSIX = os.name != "nt" and sys.prefix == sys.base_prefix
 
 
@@ -887,6 +895,13 @@ class AccountSessionState:
                 known_keys = set(cls().__dict__.keys())
                 instance = cls(**{k: v for k, v in raw_data.items() if k in known_keys and k != "used_games"})
                 instance.used_games = raw_data.get("used_games", [])
+                migrate = False
+                for key in SECRET_FIELDS:
+                    stored = str(getattr(instance, key) or "")
+                    migrate = migrate or bool(stored and not secret_store.is_protected(stored) and secret_store.available())
+                    setattr(instance, key, secret_store.reveal(key, stored))
+                if migrate:
+                    instance.persist()
                 return instance
             except Exception:
                 pass
@@ -902,7 +917,10 @@ class AccountSessionState:
         if not isinstance(existing, dict):
             existing = {}
         existing.update(asdict(self))
+        for key in SECRET_FIELDS:
+            existing[key] = secret_store.protect(key, str(existing.get(key) or ""))
         if os.name == "nt":
+            secret_store.restrict_file(STATE_STORAGE_PATH)
             STATE_STORAGE_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
         else:
             fd = os.open(STATE_STORAGE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -3229,7 +3247,7 @@ def github_device_login(T: "TerminalInterface") -> str:
     if GITHUB_CLIENT_ID.startswith("PASTE"):
         T.failure("github", "GITHUB_CLIENT_ID is not set in BadgeMaxxer.py (create an OAuth App with Device Flow enabled).")
         return ""
-    st, d = _github_request("https://github.com/login/device/code", data={"client_id": GITHUB_CLIENT_ID}, accept="application/json")
+    st, d = _github_request("https://github.com/login/device/code", data={"client_id": GITHUB_CLIENT_ID, "scope": ""}, accept="application/json")
     if st != 200 or not isinstance(d, dict) or "device_code" not in d:
         reason = (d.get("error_description") if isinstance(d, dict) else "") or STAR_ERROR or st
         T.failure("github", f"could not start GitHub login ({reason})")
