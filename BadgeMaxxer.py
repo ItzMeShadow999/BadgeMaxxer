@@ -94,6 +94,7 @@ GATEWAY_URL = "gateway.discord.gg"
 DISPATCH_BATCH_LIMIT = 50
 TIME_DEFAULT_GAMES = 3
 TIME_DEFAULT_HOURS = 10.0
+MAX_GAME_HOURS = 24.0
 VARIETY_DEFAULT_HOURS = 1.0
 STREAM_DEFAULT_HOURS = 1.0
 AUTO_GUILD_ID = "1573044682051551262"
@@ -3612,10 +3613,18 @@ class ApplicationController:
         )
         if count == BACK_TO_MENU or count is None:
             return count
-        hour_presets = [0.5, 1.0, 2.0, 5.0, 10.0, 24.0, 50.0, 100.0]
+        hour_presets = [v for v in (0.5, 1.0, 2.0, 5.0, 10.0, 24.0, 50.0, 100.0) if v <= MAX_GAME_HOURS]
+
+        def custom_hours() -> float | None:
+            value = self._ask_hours(f"Hours per game (max {MAX_GAME_HOURS:g})", min(default_hours, MAX_GAME_HOURS))
+            if value is not None and value > MAX_GAME_HOURS:
+                T.failure("input", f"Hours per game is capped at {MAX_GAME_HOURS:g}.")
+                return None
+            return value
+
         hours = self._pick_number(
-            "Hours per game?", hour_presets, lambda v: f"{v:g}h per game", default_hours,
-            lambda: self._ask_hours("Hours per game", default_hours),
+            "Hours per game?", hour_presets, lambda v: f"{v:g}h per game", min(default_hours, MAX_GAME_HOURS),
+            custom_hours,
         )
         if hours == BACK_TO_MENU or hours is None:
             return hours
@@ -3623,6 +3632,9 @@ class ApplicationController:
 
     def _run_claim(self, count: int, hours: float) -> int:
         T = self.terminal
+        if hours > MAX_GAME_HOURS:
+            T.warning("cap", f"{hours:g}h per game exceeds the {MAX_GAME_HOURS:g}h limit, using {MAX_GAME_HOURS:g}h.")
+            hours = MAX_GAME_HOURS
         selected_titles = self._filter_title_selection(count)
         if not selected_titles:
             T.failure("catalog", "No titles selected.")
