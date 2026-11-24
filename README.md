@@ -23,7 +23,10 @@
   <img src="https://img.shields.io/badge/Game%20Variety-supported-EDCB40?style=flat-square&labelColor=1a1a1a" alt="Game Variety" />
   <img src="https://github.com/mezotv/discord-badges/raw/main/assets/streaming/phenomenon.svg" alt="Streaming icon" height="20" />
   <img src="https://img.shields.io/badge/Go%20Live%20Streaming-supported-EDCB40?style=flat-square&labelColor=1a1a1a" alt="Go Live Streaming" />
-  <img src="https://img.shields.io/badge/discord-badges-5865F2?style=flat-square&logo=discord&logoColor=white&labelColor=1a1a1a" alt="Discord" />
+<a href="https://discord.gg/DTEBqvv9fb">
+  <img src="https://img.shields.io/discord/1573044682051551262?label=BadgeMaxxer%20Inc.&style=flat-square&logo=discord&logoColor=white&color=EDCB40&labelColor=1a1a1a" alt="BadgeMaxxer Inc. Discord" />
+</a>
+  
 </p>
 
 </div>
