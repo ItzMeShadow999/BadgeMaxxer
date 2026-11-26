@@ -535,7 +535,20 @@ const saveToken = t => {
 const loadStats = () => {
   try { return JSON.parse(fs.readFileSync(CONFIG.statsFile, "utf8")); } catch { return { totalHours: 0, sessions: 0 }; }
 };
-const saveStats = s => { try { fs.writeFileSync(CONFIG.statsFile, JSON.stringify(s, null, 2)); } catch {} };
+const saveStats = s => {
+  const tmp = CONFIG.statsFile + ".tmp";
+  try { fs.writeFileSync(tmp, JSON.stringify(s, null, 2)); fs.renameSync(tmp, CONFIG.statsFile); } catch {}
+};
+let hangup = false, forceKill = null, closing = null;
+// the window closes together with this process, keep the last messages readable
+const waitForEnter = () => closing || (closing = new Promise(res => {
+  clearTimeout(forceKill);
+  if (hangup || !process.stdin.isTTY || process.stdin.readableEnded) return res();
+  process.removeAllListeners("SIGINT");
+  process.once("SIGINT", res);
+  readline.createInterface({ input: process.stdin }).once("line", res).once("close", res);
+  console.log("  press enter to close this window");
+}));
 async function main() {
   if (process.argv.includes("--reset")) { try { fs.unlinkSync(CONFIG.tokenFile); } catch {} }
 
@@ -560,16 +573,25 @@ async function main() {
   const { Client } = require("@lng2004/discord.js-selfbot-v13");
   const { Streamer, prepareStream, playStream, Utils, Encoders } = await import("@dank074/discord-video-stream");
 
-  const client = new Client();
-  const streamer = new Streamer(client);
-  patchGateway(client);
-  const sendGw = payload => { try { client.ws.broadcast(payload); return true; } catch { return false; } };
-
-  let token = loadToken();
+  // BadgeMaxxer passes the id of the account it is logged in with
+  const ex = process.argv.indexOf("--expect");
+  const expectId = ex > 0 && /^\d+$/.test(process.argv[ex + 1] || "") ? process.argv[ex + 1] : "";
+  let client = new Client();
+  let token = loadToken(), saved = !!token;
   for (;;) {
-    while (!token) token = await ask("token: ", true);
+    while (!token) { token = await ask("token: ", true); saved = false; }
     try {
       await client.login(token);
+      if (expectId && client.user.id !== expectId) {
+        console.log(`this ${saved ? "saved " : ""}token belongs to @${client.user.username}, BadgeMaxxer uses another account`);
+        console.log("enter the token of the account BadgeMaxxer is logged in with");
+        try { fs.unlinkSync(CONFIG.tokenFile); } catch {}
+        try { client.destroy(); } catch {}
+        // a client keeps the first account's user and caches after destroy, so start with a new one
+        client = new Client();
+        token = null;
+        continue;
+      }
       saveToken(token);
       break;
     } catch (e) {
@@ -584,6 +606,9 @@ async function main() {
     }
   }
   console.log(`logged in as ${client.user.username}`);
+  const streamer = new Streamer(client);
+  patchGateway(client);
+  const sendGw = payload => { try { client.ws.broadcast(payload); return true; } catch { return false; } };
 
   const ident = await makeIdentity();
   const science = CONFIG.science ? makeScience(token, ident) : null;
@@ -635,25 +660,37 @@ async function main() {
   }
   if (!channel) {
     const guilds = [...client.guilds.cache.values()];
-    if (!guilds.length) { console.log("no servers"); process.exit(1); }
+    if (!guilds.length) { console.log("no servers"); await waitForEnter(); process.exit(1); }
     console.log("\nservers:");
     const g = await pick("server #", guilds, x => x.name);
     const vcs = [...g.channels.cache.values()].filter(isVoice);
-    if (!vcs.length) { console.log("no voice channels in that server"); process.exit(1); }
+    if (!vcs.length) { console.log("no voice channels in that server"); await waitForEnter(); process.exit(1); }
     console.log("\nvoice channels:");
     channel = await pick("channel #", vcs, c => c.name);
   }
   const guild = channel.guild;
 
-  const durIn = await ask(`duration in minutes (0 = until end or Ctrl+C) [${CONFIG.defaultDurationMin}]: `);
-  const durationMin = durIn === "" ? CONFIG.defaultDurationMin : Math.max(0, parseFloat(durIn) || 0);
+  let durationMin = CONFIG.defaultDurationMin;
+  for (;;) {
+    const durIn = (await ask(`duration in minutes (0 = until end or Ctrl+C) [${CONFIG.defaultDurationMin}]: `)).replace(/[\s,_]/g, "");
+    if (durIn === "") break;
+    const n = Number(durIn);
+    if (Number.isFinite(n) && n >= 0) { durationMin = n; break; }
+    console.log("invalid duration, enter a number of minutes like 90 or 1200");
+  }
   rl.close();
 
   const controller = new AbortController();
   let deadline = null;
   if (durationMin > 0) {
     deadline = Date.now() + durationMin * 60000;
-    setTimeout(() => controller.abort(), durationMin * 60000);
+    // setTimeout overflows above 2**31-1 ms (~24.8 days), so wait in chunks
+    const arm = () => {
+      const left = deadline - Date.now();
+      if (left <= 0) controller.abort();
+      else setTimeout(arm, Math.min(left, 2 ** 31 - 1));
+    };
+    arm();
   }
 
   const haveFile = !!(CONFIG.videoFile && fs.existsSync(CONFIG.videoFile));
@@ -665,10 +702,13 @@ async function main() {
     live: false, playing: false, playStart: 0, liveSince: 0, counted: 0, cycleId: 0, ctx: null, lastUnpause: 0, everLive: false,
     streamRegion: "", maxViewers: 0, zeroRecv: 0, sciActive: false, sciEver: false, sciSince: 0, presentSince: 0,
   };
+  // file totals at start plus this session, so repeated saves never add the session twice
+  const totals = () => ({ ...stats, totalHours: (stats.totalHours || 0) + state.counted / 3600, sessions: (stats.sessions || 0) + 1 });
   const viewers = () => countViewers(client, channel, state.viewerIds);
   patchVoiceSockets(state);
   let stopping = false;
-  let hookTimer = null, liveTimer = null, tickTimer = null, statusTimer = null, qosTimer = null;
+  let cycle = null;
+  let hookTimer = null, liveTimer = null, tickTimer = null, statusTimer = null, qosTimer = null, statsTimer = null;
 
   const markLive = async () => {
     if (state.live) return;
@@ -734,7 +774,7 @@ async function main() {
     if (stopping) return;
     stopping = true;
     controller.abort();
-    [tickTimer, statusTimer, hookTimer, liveTimer].forEach(t => t && clearInterval(t));
+    [tickTimer, statusTimer, hookTimer, liveTimer, statsTimer].forEach(t => t && clearInterval(t));
     if (qosTimer) clearTimeout(qosTimer);
     const pending = [endCycle()];
     if (state.streamKey) sendGw({ op: 19, d: { stream_key: state.streamKey } });
@@ -742,11 +782,10 @@ async function main() {
     try { streamer.leaveVoice(); } catch {}
     const hours = state.counted / 3600;
     if (state.counted >= 10) {
-      stats.totalHours = (stats.totalHours || 0) + hours;
-      stats.sessions = (stats.sessions || 0) + 1;
-      saveStats(stats);
+      const t = totals();
+      saveStats(t);
       log("stream", `ended · ${fmtTimer(state.counted)} (${hours.toFixed(2)}h) counted streaming hours`);
-      log("stream", `total claimed ${stats.totalHours.toFixed(2)}h over ${stats.sessions} sessions · badge progression typically syncs within 24-48 hours`);
+      log("stream", `total claimed ${t.totalHours.toFixed(2)}h over ${t.sessions} sessions · badge progression typically syncs within 24-48 hours`);
     } else if (state.everLive && science && !state.sciEver) {
       log("stream", "ended · science start events were never sent (nobody else joined the channel)");
       log("hint", "run watch.py first or alongside so the alt is in the channel before you go live");
@@ -758,6 +797,7 @@ async function main() {
     }
     await Promise.race([Promise.all(pending), sleep(CONFIG.endWaitMs)]);
     try { client.destroy(); } catch {}
+    await waitForEnter();
     process.exit(code);
   };
 
@@ -765,10 +805,16 @@ async function main() {
   process.on("SIGINT", () => {
     if (++hits > 1) process.kill(process.pid, "SIGKILL");
     console.log("stopping... (Ctrl+C again to force)");
-    setTimeout(() => process.kill(process.pid, "SIGKILL"), CONFIG.endWaitMs + 3000).unref();
+    forceKill = setTimeout(() => process.kill(process.pid, "SIGKILL"), CONFIG.endWaitMs + 3000).unref();
     shutdown();
   });
   process.on("SIGTERM", () => shutdown());
+  process.on("SIGHUP", () => {
+    hangup = true;
+    // the terminal is gone, writes to it fail and would loop through the uncaughtException handler
+    for (const s of [process.stdout, process.stderr]) s.on("error", () => {});
+    shutdown();
+  });
   process.on("uncaughtException", e => {
     if (/Track is not open/i.test(String(e && e.message))) return console.log("[warn] track not open yet, ignoring frame");
     console.error(e);
@@ -793,6 +839,12 @@ async function main() {
         state.lastUnpause = Date.now();
         sendGw({ op: 22, d: { stream_key: d.stream_key, paused: false } });
         log("stream", "stream marked unpaused (op 22 paused=false)");
+      }
+    } else if (p.t === "STREAM_DELETE" && mine(d.stream_key)) {
+      state.streamKey = "";
+      if (cycle && !cycle.signal.aborted) {
+        log("stream", `discord ended the stream (${d.reason || "no reason given"})`);
+        cycle.abort();
       }
     }
     if (CONFIG.debug) {
@@ -830,7 +882,7 @@ async function main() {
     if (state.live || !state.playing || controller.signal.aborted) return;
     const sc = streamer.voiceConnection && streamer.voiceConnection.streamConnection;
     if (!sc) return;
-    if (state.msid.stream || Date.now() - state.playStart > 25000) markLive().catch(() => {});
+    if (state.msid.stream || (state.streamKey && Date.now() - state.playStart > 25000)) markLive().catch(() => {});
   }, 500);
   if (CONFIG.qos) {
     const qos = () => {
@@ -841,10 +893,11 @@ async function main() {
     };
     qosTimer = setTimeout(qos, CONFIG.qosEveryMs);
   }
-  let lastTick = Date.now();
+  let lastTick = performance.now();
   tickTimer = setInterval(() => {
-    const now = Date.now();
-    const dt = (now - lastTick) / 1000;
+    const now = performance.now();
+    // capped so sleep, a stalled process or clock changes do not count as streamed time
+    const dt = Math.min(Math.max(now - lastTick, 0), 5000) / 1000;
     lastTick = now;
     if (state.live && (!CONFIG.onlyCountWithViewers || viewers() > 0)) state.counted += dt;
     if (state.sciActive) {
@@ -868,16 +921,21 @@ async function main() {
     else if (streamer.voiceConnection) log("stream", `starting stream · ${t}`);
     else log("stream", `reconnecting · ${t}`);
   }, CONFIG.statusEverySec * 1000);
+  statsTimer = setInterval(() => { if (state.counted >= 10) saveStats(totals()); }, 60000);
 
   log("stream", `settling ${CONFIG.settleMs / 1000}s...`);
   await sleep(CONFIG.settleMs);
+  const joinVoice = () => {
+    let timer;
+    return Promise.race([
+      streamer.joinVoice(guild.id, channel.id),
+      new Promise((_, rej) => { timer = setTimeout(() => rej(new Error(`joinVoice timed out after ${CONFIG.joinTimeoutMs / 1000}s`)), CONFIG.joinTimeoutMs); }),
+    ]).finally(() => clearTimeout(timer));
+  };
   log("voice", "joining...");
   for (let attempt = 1; ; attempt++) {
     try {
-      await Promise.race([
-        streamer.joinVoice(guild.id, channel.id),
-        new Promise((_, rej) => setTimeout(() => rej(new Error(`joinVoice timed out after ${CONFIG.joinTimeoutMs / 1000}s`)), CONFIG.joinTimeoutMs)),
-      ]);
+      await joinVoice();
       break;
     } catch (e) {
       log("voice", `join attempt ${attempt} failed: ${e.message || e}`);
@@ -898,7 +956,9 @@ async function main() {
         ...(CONFIG.withAudio ? ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"] : []), ...out,
         ...(CONFIG.withAudio ? ["-af", "volume=0.001", "-c:a", "libopus"] : ["-an"]), "-f", "matroska", "pipe:1"];
     const ff = spawn(CONFIG.ffmpeg, args, { stdio: ["ignore", "pipe", "pipe"] });
-    controller.signal.addEventListener("abort", () => ff.kill("SIGKILL"), { once: true });
+    const kill = () => ff.kill("SIGKILL");
+    controller.signal.addEventListener("abort", kill, { once: true });
+    ff.once("close", () => controller.signal.removeEventListener("abort", kill));
     let last = 0;
     ff.stderr.on("data", d => {
       const t = String(d);
@@ -909,9 +969,15 @@ async function main() {
     return ff;
   };
 
+  const stopped = new Promise(r => controller.signal.addEventListener("abort", r, { once: true }));
   await sleep(CONFIG.preFeedMs);
   while (!controller.signal.aborted) {
     state.msid.stream = "";
+    state.streamKey = "";
+    const run = new AbortController();
+    const stopRun = () => run.abort();
+    controller.signal.addEventListener("abort", stopRun, { once: true });
+    cycle = run;
     const ff = spawnFeed();
     try {
       const { command, output } = prepareStream(ff.stdout, {
@@ -923,22 +989,36 @@ async function main() {
         videoCodec: Utils.normalizeVideoCodec("H264"),
         encoder: Encoders.software({ x264: { preset: "ultrafast" }, x265: { preset: "ultrafast" } }),
         includeAudio: CONFIG.withAudio,
-      }, controller.signal);
+      }, run.signal);
       if (command && command.on) command.on("error", e => console.log("ffmpeg:", e.message || e));
       state.playing = true;
       state.playStart = Date.now();
-      await playStream(output, streamer, { type: "go-live" }, controller.signal);
+      // playStream only watches the signal once Discord sent STREAM_CREATE, which may never happen
+      await Promise.race([
+        playStream(output, streamer, { type: "go-live" }, run.signal),
+        new Promise(r => run.signal.addEventListener("abort", r, { once: true })),
+      ]);
     } catch (e) {
-      if (!controller.signal.aborted) console.log("stream error:", e.message || e);
+      if (!run.signal.aborted) console.log("stream error:", e.message || e);
     }
+    cycle = null;
+    controller.signal.removeEventListener("abort", stopRun);
     state.playing = false;
     await endCycle();
+    try { streamer.stopStream(); } catch {}
     ff.kill("SIGKILL");
     if (controller.signal.aborted || !CONFIG.autoRestart) break;
     console.log(`stream ended, restarting in ${CONFIG.restartDelayMs / 1000}s`);
+    // the old voice connection object stays set even when it is dead, so always rejoin
+    try { streamer.leaveVoice(); } catch {}
     await sleep(CONFIG.restartDelayMs);
-    if (!streamer.voiceConnection) {
-      try { await streamer.joinVoice(guild.id, channel.id); } catch (e) { log("voice", `rejoin failed: ${e.message || e}`); }
+    if (controller.signal.aborted) break;
+    log("voice", "rejoining...");
+    try {
+      await Promise.race([joinVoice(), stopped]);
+    } catch (e) {
+      log("voice", `rejoin failed: ${e.message || e}`);
+      try { streamer.leaveVoice(); } catch {}
     }
   }
 
@@ -946,4 +1026,4 @@ async function main() {
   await shutdown();
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+main().catch(async e => { console.error(e); await waitForEnter(); process.exit(1); });

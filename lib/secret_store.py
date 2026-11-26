@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import os
 import shutil
 import subprocess
@@ -13,6 +14,12 @@ SERVICE = "badgemaxxer"
 
 _warned: set[str] = set()
 _restricted: set[str] = set()
+# Keyring items are per install folder, so two copies of BadgeMaxxer never share a token.
+_SCOPE = hashlib.sha256(str(Path(__file__).resolve().parent.parent).encode("utf-8")).hexdigest()[:12]
+
+
+def _item(name: str) -> str:
+    return f"{name}@{_SCOPE}"
 
 
 def _warn(key: str, message: str) -> None:
@@ -93,10 +100,10 @@ def protect(name: str, value: str) -> str:
         _warn("dpapi", "Windows DPAPI failed, secrets are stored in plaintext.")
         return value
     if _keyring_tool_present():
-        done = _secret_tool(["store", "--label", f"BadgeMaxxer {name}", "service", SERVICE, "name", name],
+        done = _secret_tool(["store", "--label", f"BadgeMaxxer {name}", "service", SERVICE, "name", _item(name)],
                             value.encode("utf-8"))
         if done is not None:
-            return KEYRING_TAG + name
+            return KEYRING_TAG + _item(name)
         _warn("keyring", "could not reach the desktop keyring (locked or no session), "
                          "secrets are stored in plaintext with mode 0600.")
         return value
@@ -118,21 +125,25 @@ def reveal(name: str, stored: str) -> str:
         return raw.decode("utf-8", "replace") if raw else ""
     if stored.startswith(KEYRING_TAG):
         out = _secret_tool(["lookup", "service", SERVICE, "name", stored[len(KEYRING_TAG):]])
-        return out.decode("utf-8", "replace") if out else ""
+        if out is None:
+            _warn("keyring-read", "could not read from the desktop keyring (locked, no session or secret-tool missing). "
+                                  "Saved secrets stay there and are used again once the keyring can be reached.")
+            return ""
+        return out.decode("utf-8", "replace")
     return stored
 
 
 def discard(name: str) -> None:
     if _keyring_tool_present():
-        _secret_tool(["clear", "service", SERVICE, "name", name])
+        _secret_tool(["clear", "service", SERVICE, "name", _item(name)])
 
 
-def restrict_file(path: str | os.PathLike) -> None:
+def restrict_file(path: str | os.PathLike, force: bool = False) -> None:
     if os.name != "nt":
         return
     target = Path(path)
     key = str(target.resolve())
-    if key in _restricted:
+    if key in _restricted and target.exists() and not force:
         return
     _restricted.add(key)
     user = os.environ.get("USERNAME", "")

@@ -6,6 +6,10 @@ watcher_session.json
 watcher_debug.log
 data/
 bm_debug/
+Streamer/streamertoken*.json
+Streamer/streamer_stats.json*
+Streamer/node_modules/
+Streamer/package-lock.json
 
 # python
 __pycache__/
