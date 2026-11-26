@@ -3,7 +3,7 @@ $Repo   = "badgemaxxer"
 $Tag    = $env:BADGEMAXXER_TAG
 $Releases = "https://github.com/$Owner/$Repo/releases"
 $Dir    = Join-Path $env:USERPROFILE "BadgeMaxxer"
-$Files  = @("BadgeMaxxer.py", "lib/secret_store.py", "Watcher/stream_watcher.py", "Watcher/watcher_voice.py", "Watcher/watcher_common.py")
+$Files  = @("BadgeMaxxer.py", "lib/secret_store.py", "Watcher/stream_watcher.py", "Watcher/watcher_voice.py", "Watcher/watcher_common.py", "Streamer/Streamer.js")
 $Packages = @("websockets", "davey", "cryptography")
 
 function Write-Step($text) { Write-Host "  $text" -ForegroundColor Yellow }
