@@ -6,7 +6,7 @@ REPO="badgemaxxer"
 TAG="${BADGEMAXXER_TAG:-}"
 RELEASES="https://github.com/$OWNER/$REPO/releases"
 DIR="$HOME/BadgeMaxxer"
-FILES="BadgeMaxxer.py lib/secret_store.py Watcher/stream_watcher.py Watcher/watcher_voice.py Watcher/watcher_common.py"
+FILES="BadgeMaxxer.py lib/secret_store.py Watcher/stream_watcher.py Watcher/watcher_voice.py Watcher/watcher_common.py Streamer/Streamer.js"
 PACKAGES="websockets davey cryptography"
 
 if [ -t 1 ]; then
@@ -84,7 +84,7 @@ install_badgemaxxer() {
         return 1
     fi
 
-    if ! mkdir -p "$DIR/Watcher" "$DIR/lib"; then
+    if ! mkdir -p "$DIR/Watcher" "$DIR/lib" "$DIR/Streamer"; then
         bad "Could not create $DIR"
         return 1
     fi
@@ -93,6 +93,7 @@ install_badgemaxxer() {
         target="$DIR/$file"
         temp="$target.download"
         step "Fetching $file ...."
+        mkdir -p "$(dirname "$target")"
         if ! fetch "$base/$file" "$temp"; then
             rm -f "$temp"
             bad "Could not install $file : download failed"
