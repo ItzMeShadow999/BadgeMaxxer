@@ -454,6 +454,11 @@ function hookWs(kind, ws, state) {
     try { msg = JSON.parse(text); } catch { return; }
     handleVoiceMessage(kind, ws, msg, state);
   });
+  ws.on("close", (code, reason) => {
+    const why = reason && reason.length ? ` "${reason.toString("utf8").slice(0, 120)}"` : "";
+    log(kind, `socket closed: code ${code}${why}`);
+  });
+  ws.on("error", e => log(kind, `socket error: ${causeOf(e)}`));
 }
 
 function patchVoiceSockets(state) {
@@ -700,7 +705,7 @@ async function main() {
     hooked: new WeakSet(), op16Sent: new WeakSet(), msid: {}, pixels: {},
     voiceHost: "", streamHost: "", streamKey: "", viewerIds: new Set(),
     live: false, playing: false, playStart: 0, liveSince: 0, counted: 0, cycleId: 0, ctx: null, lastUnpause: 0, everLive: false,
-    streamRegion: "", maxViewers: 0, zeroRecv: 0, sciActive: false, sciEver: false, sciSince: 0, presentSince: 0,
+    streamRegion: "", maxViewers: 0, zeroRecv: 0, sciActive: false, sciEver: false, sciSince: 0, presentSince: 0, voiceDropped: false,
   };
   // file totals at start plus this session, so repeated saves never add the session twice
   const totals = () => ({ ...stats, totalHours: (stats.totalHours || 0) + state.counted / 3600, sessions: (stats.sessions || 0) + 1 });
@@ -816,8 +821,14 @@ async function main() {
     shutdown();
   });
   process.on("uncaughtException", e => {
-    if (/Track is not open/i.test(String(e && e.message))) return console.log("[warn] track not open yet, ignoring frame");
-    console.error(e);
+    const msg = String(e && e.message || e);
+    if (/Track is not open/i.test(msg)) return console.log("[warn] track not open yet, ignoring frame");
+    // non-fatal stream/codec/pipe noise — log and keep going
+    if (/EPIPE|ERR_STREAM|write after end|Cannot read propert/i.test(msg)) {
+      log("error", `non-fatal uncaught exception (continuing): ${msg}`);
+      return;
+    }
+    console.error("[fatal] uncaught exception:", e);
     shutdown(1);
   });
   process.on("unhandledRejection", e => log("error", String((e && e.message) || e)));
@@ -840,10 +851,16 @@ async function main() {
         sendGw({ op: 22, d: { stream_key: d.stream_key, paused: false } });
         log("stream", "stream marked unpaused (op 22 paused=false)");
       }
+    } else if (p.t === "VOICE_STATE_UPDATE" && d.user_id === client.user.id && !d.channel_id) {
+      // account was kicked or moved out of voice — trigger a rejoin via the watchdog
+      log("voice", "dropped from voice channel (VOICE_STATE_UPDATE channel_id null) — watchdog will rejoin");
+      state.voiceDropped = true;
+      if (cycle && !cycle.signal.aborted) cycle.abort();
     } else if (p.t === "STREAM_DELETE" && mine(d.stream_key)) {
       state.streamKey = "";
+      const why = d.reason ? ` reason: ${d.reason}` : " (no reason given)";
       if (cycle && !cycle.signal.aborted) {
-        log("stream", `discord ended the stream (${d.reason || "no reason given"})`);
+        log("stream", `discord ended the stream${why}`);
         cycle.abort();
       }
     }
@@ -1008,17 +1025,48 @@ async function main() {
     try { streamer.stopStream(); } catch {}
     ff.kill("SIGKILL");
     if (controller.signal.aborted || !CONFIG.autoRestart) break;
-    console.log(`stream ended, restarting in ${CONFIG.restartDelayMs / 1000}s`);
-    // the old voice connection object stays set even when it is dead, so always rejoin
-    try { streamer.leaveVoice(); } catch {}
-    await sleep(CONFIG.restartDelayMs);
-    if (controller.signal.aborted) break;
-    log("voice", "rejoining...");
-    try {
-      await Promise.race([joinVoice(), stopped]);
-    } catch (e) {
-      log("voice", `rejoin failed: ${e.message || e}`);
+
+    const wasDropped = state.voiceDropped;
+    state.voiceDropped = false;
+    if (wasDropped) {
+      // watchdog path: account was removed from voice, need a full rejoin before resuming
+      log("voice", `kicked from voice, waiting ${CONFIG.restartDelayMs / 1000}s before rejoining`);
       try { streamer.leaveVoice(); } catch {}
+      await sleep(CONFIG.restartDelayMs);
+      if (controller.signal.aborted) break;
+      log("voice", "watchdog: rejoining after drop...");
+      let rejoined = false;
+      for (let attempt = 1; attempt <= CONFIG.joinTries; attempt++) {
+        try {
+          await Promise.race([joinVoice(), stopped]);
+          rejoined = true;
+          log("voice", `watchdog: rejoin succeeded (attempt ${attempt})`);
+          break;
+        } catch (e) {
+          log("voice", `watchdog: rejoin attempt ${attempt} failed: ${e.message || e}`);
+          try { streamer.leaveVoice(); } catch {}
+          if (controller.signal.aborted) break;
+          if (attempt < CONFIG.joinTries) await sleep(10000);
+        }
+      }
+      if (!rejoined) {
+        log("voice", "watchdog: gave up rejoining after all attempts, shutting down");
+        return shutdown(1);
+      }
+    } else {
+      // normal stream-end path: voice connection is still live, just restart the feed
+      console.log(`stream ended, restarting in ${CONFIG.restartDelayMs / 1000}s`);
+      // the old voice connection object stays set even when it is dead, so always rejoin
+      try { streamer.leaveVoice(); } catch {}
+      await sleep(CONFIG.restartDelayMs);
+      if (controller.signal.aborted) break;
+      log("voice", "rejoining...");
+      try {
+        await Promise.race([joinVoice(), stopped]);
+      } catch (e) {
+        log("voice", `rejoin failed: ${e.message || e}`);
+        try { streamer.leaveVoice(); } catch {}
+      }
     }
   }
 
