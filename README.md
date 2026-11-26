@@ -18,7 +18,7 @@
 
 <p align="center">
   <img src="https://github.com/mezotv/discord-badges/raw/main/assets/game-time/eternal.svg" alt="Game Time icon" height="20" />
-  <img src="https://img.shields.io/badge/Game%20Time-supported-EDCB40?style=flat-square&labelColor=1a1a1a" alt="Game Time" />
+  <img src="https://img.shields.io/badge/Game%20Time-Patched-EDCB40?style=flat-square&labelColor=1a1a1a" alt="Game Time" />
   <img src="https://github.com/mezotv/discord-badges/raw/main/assets/game-variety/universalist.svg" alt="Game Variety icon" height="20" />
   <img src="https://img.shields.io/badge/Game%20Variety-supported-EDCB40?style=flat-square&labelColor=1a1a1a" alt="Game Variety" />
   <img src="https://github.com/mezotv/discord-badges/raw/main/assets/streaming/phenomenon.svg" alt="Streaming icon" height="20" />
