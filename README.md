@@ -142,7 +142,7 @@ For stream time to count:
 - `session.json` and `Watcher/watcher_session.json` keep the Discord tokens, cookie, analytics token, GitHub token and fingerprint encrypted with Windows DPAPI (tied to your Windows user) or in the Linux desktop keyring (needs `secret-tool` from libsecret). On Windows the files are also locked to your user with an ACL. Without `secret-tool` on Linux they fall back to plaintext with mode 0600 and a warning. Old plaintext files are migrated on the next start. This does not stop a program already running as you from asking for the secrets. Never share or commit these files.
 - The GitHub login is only used to check your star and follow, and requests no scopes (public read only). To revoke it, remove the app under GitHub Settings > Applications.
 - `Watcher/watcher_session.json` and `Watcher/watcher_debug.log` are git-ignored. Do not commit them.
-- The Watcher needs all three files in `Watcher/`. A release must contain them, or the installers stop with "no checksum listed".
+- The Watcher needs all three files in `Watcher/`. `Streamer/Streamer.js` must also be in the release. A release must contain every installed file in `SHA256SUMS`, or the installers stop with "no checksum listed".
 
 ## Disclaimer
 
