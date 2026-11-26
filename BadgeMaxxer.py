@@ -9,15 +9,11 @@ import importlib.util
 import json
 import math
 import os
-import random
 import re
 import select
 import shlex
 import shutil
 import signal
-import socket
-import ssl
-import struct
 import subprocess
 import sys
 import tempfile
@@ -45,33 +41,15 @@ SYSTEM_PYTHON_POSIX = os.name != "nt" and sys.prefix == sys.base_prefix
 
 def _install_package(name: str) -> bool:
     try:
-        result = subprocess.run(
+        result = run_with_loader(
+            name,
             [sys.executable, "-m", "pip", "install", "--quiet", "--disable-pip-version-check", name],
-            capture_output=True, text=True, timeout=300,
+            timeout=300,
         )
     except Exception:
         return False
     return result.returncode == 0
 
-
-def _load_crypto() -> bool:
-    global AESGCM
-    try:
-        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-        return True
-    except ImportError:
-        return False
-
-
-HAS_CRYPTO = _load_crypto()
-if not HAS_CRYPTO:
-    print("Installing missing dependency: cryptography ...")
-    if _install_package("cryptography"):
-        importlib.invalidate_caches()
-        HAS_CRYPTO = _load_crypto()
-    print("cryptography installed." if HAS_CRYPTO else "cryptography could not be installed, continuing without encrypted audio frames.")
-    if not HAS_CRYPTO and SYSTEM_PYTHON_POSIX:
-        print("On Linux, use install.sh to set up the packages in a virtual environment.")
 
 WORKSPACE_DIR = Path(__file__).resolve().parent
 STATE_STORAGE_PATH = WORKSPACE_DIR / "session.json"
@@ -79,6 +57,10 @@ WATCHER_DIR = WORKSPACE_DIR / "Watcher"
 WATCHER_SCRIPT = WATCHER_DIR / "stream_watcher.py"
 WATCHER_FILES = ("stream_watcher.py", "watcher_voice.py", "watcher_common.py")
 WATCHER_PACKAGES = ("websockets", "davey")
+STREAMER_DIR = WORKSPACE_DIR / "Streamer"
+STREAMER_SCRIPT = STREAMER_DIR / "Streamer.js"
+STREAMER_STATS = STREAMER_DIR / "streamer_stats.json"
+STREAMER_PACKAGES = ("@lng2004/discord.js-selfbot-v13", "@dank074/discord-video-stream")
 DATABASE_STORAGE_PATH = WORKSPACE_DIR / "data" / "games.json"
 
 REST_IDENTITY_URL = "https://discord.com/api/v9/users/@me?with_analytics_token=true"
@@ -89,7 +71,6 @@ SUPPORT_INVITE_URL = f"https://discord.gg/{SUPPORT_INVITE_CODE}"
 TELEMETRY_INGEST_URL = "https://discord.com/api/v9/science"
 UPSTREAM_METRICS_URL = "https://cordapi.dolfi.es/api/v2/properties/windows"
 DISCORD_CATALOG_URL = "https://cdn.discordapp.com/detectables/games.json"
-GATEWAY_URL = "gateway.discord.gg"
 
 DISPATCH_BATCH_LIMIT = 50
 TIME_DEFAULT_GAMES = 3
@@ -765,39 +746,275 @@ class LineLoader:
         self.frame = 0
         self.last_draw = 0.0
         self.active = False
+        self.pct: float = 0.0
+        self.dl_mb: float = 0.0
+        self.total_mb: float = 0.0
+        self._two_line = False
+        self.sub: str = ""
+        self.cur: str = ""
+        self.force_bar: bool = False
+        self._rows: int = 1
 
     @staticmethod
     def _width() -> int:
         return max(40, shutil.get_terminal_size((80, 24)).columns)
 
-    def update(self, name: str, tail: str, force: bool = False) -> None:
+    def _bar(self, fill: int, width: int) -> str:
+        """Return a coloured block bar of the given character width."""
+        done = round(fill * width)
+        done = max(0, min(done, width))
+        filled = "█" * done
+        empty  = "░" * (width - done)
+        return f"{GOLD}{filled}\x1b[90m{empty}{ANSI_RESET}"
+
+    def _size_str(self, mb: float) -> str:
+        if mb < 1.0:
+            return f"{mb * 1024:.0f} KB"
+        return f"{mb:.1f} MB"
+
+    def update(self, name: str, tail: str, force: bool = False, prefix: str = "Fetching ") -> None:
         if not self.enabled:
             return
         now = time.time()
-        if not force and now - self.last_draw < 0.04:
+        if not force and now - self.last_draw < 0.06:
             return
         self.last_draw = now
+
         w = self._width()
         line_w = min(w, 100) - 5
-        prefix = "Fetching "
         end = (tail[:-5] if tail.endswith(" done") else tail).rjust(10)
         name_w = max(8, line_w - len(prefix) - 5 - len(end))
         nm = name if len(name) <= name_w else name[: name_w - 1] + "…"
         label = f"{prefix}{nm.ljust(name_w)}.... {end}"
         spin = SPIN_FRAMES[self.frame % len(SPIN_FRAMES)]
         self.frame += 1
+
         if not self.active:
             sys.stdout.write("\x1b[?25l")
             self.active = True
-        sys.stdout.write(f"\r  {GOLD}{spin}{ANSI_RESET} \x1b[37m{label.ljust(w - 5)}{ANSI_RESET}")
+
+        show_bar = self.force_bar or self.pct > 0.0 or self.dl_mb > 0.0
+        rows = [f"  {GOLD}{spin}{ANSI_RESET} \x1b[37m{label.ljust(w - 5)}{ANSI_RESET}"]
+
+        if show_bar:
+            pct_str = f"{int(self.pct * 100)}%"
+            if self.total_mb > 0:
+                size_str = f"{self._size_str(self.dl_mb)} / {self._size_str(self.total_mb)}"
+            else:
+                size_str = self._size_str(self.dl_mb)
+            right_part = f"  {pct_str.rjust(4)}  {size_str}"
+            bar_avail = max(10, w - 4 - len(right_part) - 2)
+            if self.sub:
+                sub = self.sub if len(self.sub) <= w - 8 else self.sub[: w - 9] + "…"
+                rows.append(f"    \x1b[90m↳ {ANSI_RESET}\x1b[37m{sub}{ANSI_RESET}")
+            rows.append(f"    {self._bar(self.pct, bar_avail)}{ANSI_RESET}\x1b[90m{right_part}{ANSI_RESET}")
+
+        if self._rows > 1:
+            sys.stdout.write(f"\x1b[{self._rows - 1}A")
+        sys.stdout.write("\r")
+        if len(rows) != self._rows:
+            sys.stdout.write("\x1b[J")
+        sys.stdout.write("\n".join("\x1b[2K" + r for r in rows))
+        self._rows = len(rows)
+        self._two_line = self._rows > 1
         sys.stdout.flush()
 
     def clear(self) -> None:
         if not self.enabled or not self.active:
             return
-        sys.stdout.write("\r" + " " * (self._width() - 1) + "\r\x1b[?25h")
+        w = self._width()
+        blank = "\r" + " " * (w - 1) + "\r"
+        if self._rows > 1:
+            sys.stdout.write(f"\r\x1b[{self._rows - 1}A\x1b[J\x1b[?25h")
+            self._rows = 1
+            self._two_line = False
+        else:
+            sys.stdout.write(f"{blank}\x1b[?25h")
         sys.stdout.flush()
         self.active = False
+
+
+import re as _re
+_NPM_HTTP_RE  = _re.compile(r"npm http fetch GET 200 .+?(\d+)ms \((\d+) bytes\)", _re.IGNORECASE)
+_NPM_STAGE_RE = _re.compile(r"npm timing (reify|resolve|fetch|link|audit)(?:Node)?:(\S+)", _re.IGNORECASE)
+_NPM_FETCH_RE = _re.compile(r"http fetch GET \d+ (\S+)", _re.IGNORECASE)
+_NPM_TGZ_VER_RE = _re.compile(r"-(\d[\w.+-]*)\.tgz$")
+
+
+def _parse_npm_progress(line: str, loader: "LineLoader", fetched_bytes: list) -> None:
+    m = _NPM_FETCH_RE.search(line)
+    if not m:
+        return
+    path = urllib.parse.unquote(m.group(1).split("://", 1)[-1].split("/", 1)[-1])
+    if "/-/" in path:
+        name, rest = path.split("/-/", 1)
+        v = _NPM_TGZ_VER_RE.search(rest)
+        loader.cur = f"{name}@{v.group(1)}" if v else name
+    elif path:
+        loader.cur = f"resolving {path}"
+
+
+def _scan_modules(root: str) -> tuple[int, float]:
+    count = 0
+    size = 0
+    for dp, _dn, fn in os.walk(root):
+        for f in fn:
+            try:
+                size += os.path.getsize(os.path.join(dp, f))
+            except OSError:
+                pass
+        if "package.json" in fn:
+            parent = os.path.basename(os.path.dirname(dp))
+            grand = os.path.basename(os.path.dirname(os.path.dirname(dp)))
+            if parent == "node_modules" or (parent.startswith("@") and grand == "node_modules"):
+                count += 1
+    return count, size / 1_048_576
+
+
+def _npm_expected_packages(label: str, cmd: list[str], cwd: str | None, loader: "LineLoader") -> int:
+    box: dict = {}
+
+    def _dry() -> None:
+        try:
+            r = subprocess.run(
+                cmd + ["--dry-run", "--json"], cwd=cwd, capture_output=True,
+                text=True, encoding="utf-8", errors="replace", timeout=120,
+            )
+            box["out"] = r.stdout or ""
+        except Exception:
+            box["out"] = ""
+
+    th = threading.Thread(target=_dry, daemon=True)
+    th.start()
+    loader.force_bar = True
+    loader.sub = "resolving dependency tree"
+    while th.is_alive():
+        loader.update(label, "resolving", prefix="Installing ")
+        time.sleep(0.08)
+    out = box.get("out", "")
+    try:
+        data = json.loads(out[out.index("{"):])
+        added = data.get("added", 0)
+        return len(added) if isinstance(added, list) else int(added)
+    except Exception:
+        return 0
+
+
+def run_with_loader(label: str, cmd: list[str], *, cwd: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess:
+    """Run a subprocess while showing a spinner + live progress bar.
+
+    For npm install commands the bar shows N% and MB/MB downloaded in real time.
+    For other commands it falls back to a plain spinner.
+    """
+    loader = LineLoader()
+    is_npm = any("npm" in str(c) for c in cmd)
+    fetched_bytes: list[int] = [0]
+    expected = 0
+    if is_npm and "install" in [str(c) for c in cmd] and "--dry-run" not in cmd:
+        try:
+            expected = _npm_expected_packages(label, [str(c) for c in cmd], cwd, loader)
+        finally:
+            loader.clear()
+    if is_npm:
+        loader.force_bar = True
+
+    if is_npm:
+        verbose_cmd = [str(c) for c in cmd]
+        if "--loglevel" not in " ".join(verbose_cmd):
+            verbose_cmd = [verbose_cmd[0]] + ["--loglevel=verbose"] + verbose_cmd[1:]
+        proc = subprocess.Popen(
+            verbose_cmd, cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            encoding="utf-8", errors="replace",
+        )
+    else:
+        proc = subprocess.Popen(
+            cmd, cwd=cwd,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            encoding="utf-8", errors="replace",
+        )
+
+    import threading, queue as _queue
+    stderr_lines: list[str] = []
+    stdout_lines: list[str] = []
+    done_evt = threading.Event()
+
+    def _drain(stream, store: list, parse: bool) -> None:
+        for raw in stream:
+            store.append(raw)
+            if parse:
+                _parse_npm_progress(raw, loader, fetched_bytes)
+        done_evt.set()
+
+    if is_npm:
+        t_err = threading.Thread(target=_drain, args=(proc.stderr, stderr_lines, True), daemon=True)
+        t_out = threading.Thread(target=_drain, args=(proc.stdout, stdout_lines, False), daemon=True)
+        t_err.start()
+        t_out.start()
+    else:
+        t_out = threading.Thread(target=_drain, args=(proc.stdout, stdout_lines, False), daemon=True)
+        t_out.start()
+
+    stop_mon = threading.Event()
+
+    def _monitor() -> None:
+        nm = os.path.join(cwd or os.getcwd(), "node_modules")
+        base_pk, base_mb = _scan_modules(nm)
+        while not stop_mon.is_set():
+            pk, mb = _scan_modules(nm)
+            done = max(0, pk - base_pk)
+            dl = max(0.0, mb - base_mb)
+            if expected > 0:
+                frac = min(done / expected, 0.99)
+                total = max(dl, dl / frac) if frac >= 0.1 else max(dl, 40.0)
+                loader.pct = frac
+                loader.total_mb = total
+                count = f"{min(done, expected)}/{expected} packages"
+            else:
+                total = max(dl + 5.0, 40.0)
+                loader.pct = min(dl / total, 0.95)
+                loader.total_mb = total
+                count = f"{done} packages"
+            loader.dl_mb = dl
+            loader.sub = f"{loader.cur}  ({count})" if loader.cur else count
+            stop_mon.wait(0.35)
+
+    if is_npm:
+        threading.Thread(target=_monitor, daemon=True).start()
+
+    start = time.time()
+    timed_out = False
+    try:
+        while True:
+            loader.update(label, "installing", prefix="Installing ")
+            try:
+                proc.wait(timeout=0.08)
+                break
+            except subprocess.TimeoutExpired:
+                if timeout is not None and time.time() - start > timeout:
+                    proc.kill()
+                    proc.wait()
+                    timed_out = True
+                    break
+        stop_mon.set()
+        if is_npm and not timed_out:
+            loader.sub = "done"
+            loader.pct = 1.0
+            loader.dl_mb = loader.total_mb if loader.total_mb > 0 else loader.dl_mb
+        loader.update(label, "timed out" if timed_out else "done", force=True, prefix="Installing ")
+    finally:
+        loader.clear()
+
+    if is_npm:
+        t_err.join(timeout=2)
+        t_out.join(timeout=2)
+    else:
+        t_out.join(timeout=2)
+
+    output = "".join(stdout_lines) + "".join(stderr_lines)
+    if timed_out:
+        raise subprocess.TimeoutExpired(cmd, timeout, output=output)
+    return subprocess.CompletedProcess(cmd, proc.returncode, stdout=output, stderr="")
 
 
 class TerminalInterface:
@@ -1489,8 +1706,6 @@ STREAM_TIERS = [
     (10, "Phenomenon", 5000),
 ]
 
-OPUS_SILENCE = b"\xf8\xff\xfe"
-
 
 
 class Console:
@@ -1545,1693 +1760,6 @@ class Console:
 
     def rule(self) -> None:
         print(f"  {self.GREY}{self.RULE}{self.RESET}")
-
-
-
-class MiniWebSocket:
-
-    def __init__(self, host: str, port: int = 443, path: str = "/") -> None:
-        host_clean = host.replace("wss://", "").replace("https://", "").rstrip("/")
-        if ":" in host_clean:
-            h, p = host_clean.split(":", 1)
-            self.host = h
-            try:
-                self.port = int(p)
-            except ValueError:
-                self.port = port
-        else:
-            self.host = host_clean
-            self.port = port
-
-        self.path = path
-        self.sock: ssl.SSLSocket | None = None
-        self.closed = True
-        self._lock = threading.RLock()
-        self._buf = b""
-
-    def connect(self) -> None:
-        self._buf = b""
-        raw_sock = socket.create_connection((self.host, self.port), timeout=15)
-        ctx = ssl.create_default_context()
-        self.sock = ctx.wrap_socket(raw_sock, server_hostname=self.host)
-        sec_key = base64.b64encode(os.urandom(16)).decode("ascii")
-
-        host_hdr = self.host if self.port == 443 else f"{self.host}:{self.port}"
-        req = (
-            f"GET {self.path} HTTP/1.1\r\n"
-            f"Host: {host_hdr}\r\n"
-            f"Upgrade: websocket\r\n"
-            f"Connection: Upgrade\r\n"
-            f"Sec-WebSocket-Key: {sec_key}\r\n"
-            f"Sec-WebSocket-Version: 13\r\n"
-            f"User-Agent: {USER_AGENT}\r\n\r\n"
-        )
-        self.sock.sendall(req.encode("utf-8"))
-
-        header_data = b""
-        while b"\r\n\r\n" not in header_data:
-            chunk = self.sock.recv(4096)
-            if not chunk:
-                raise ConnectionError("failed handshake")
-            header_data += chunk
-
-        first_line = header_data.split(b"\r\n")[0].decode("utf-8", "ignore")
-        if "101" not in first_line:
-            raise ConnectionError(f"handshake rejected: {first_line}")
-        self._buf = header_data.split(b"\r\n\r\n", 1)[1]
-        self.closed = False
-
-    def send(self, data: str) -> None:
-        with self._lock:
-            if self.closed or not self.sock:
-                raise ConnectionError("socket closed")
-            try:
-                payload = data.encode("utf-8")
-                length = len(payload)
-                mask_key = os.urandom(4)
-
-                header = bytearray([0x81])
-                if length <= 125:
-                    header.append(0x80 | length)
-                elif length <= 65535:
-                    header.append(0x80 | 126)
-                    header.extend(length.to_bytes(2, "big"))
-                else:
-                    header.append(0x80 | 127)
-                    header.extend(length.to_bytes(8, "big"))
-
-                header.extend(mask_key)
-                masked = bytearray(payload[i] ^ mask_key[i % 4] for i in range(length))
-                self.sock.sendall(header + masked)
-            except Exception as e:
-                self.close()
-                raise ConnectionError(f"socket write error: {e}") from e
-
-    def _recv_exact(self, n: int) -> bytes:
-        buf = bytearray()
-        if self._buf:
-            take = self._buf[:n]
-            self._buf = self._buf[len(take):]
-            buf.extend(take)
-        while len(buf) < n:
-            chunk = self.sock.recv(n - len(buf))
-            if not chunk:
-                raise ConnectionError("socket closed during read")
-            buf.extend(chunk)
-        return bytes(buf)
-
-    def recv(self, timeout: float = 5.0) -> dict | None:
-        if self.closed or not self.sock:
-            return None
-        try:
-            if not self._buf and not self.sock.pending():
-                r, _, _ = select.select([self.sock], [], [], timeout)
-                if not r:
-                    return None
-            head = self._recv_exact(2)
-        except Exception:
-            self.close()
-            return None
-
-        opcode = head[0] & 0x0F
-        if opcode == 0x8:
-            code = 0
-            reason = ""
-            try:
-                c_len = head[1] & 0x7F
-                if c_len >= 2:
-                    p = self._recv_exact(c_len)
-                    code = struct.unpack(">H", p[:2])[0]
-                    reason = p[2:].decode("utf-8", "ignore")
-            except Exception:
-                pass
-            self.close()
-            return {"op": "close", "code": code, "reason": reason}
-        if opcode == 0x9:
-            try:
-                data = self._read_payload(head)
-                with self._lock:
-                    if self.sock and not self.closed:
-                        mask = os.urandom(4)
-                        pong = bytearray([0x8A, 0x80 | len(data)])
-                        pong.extend(mask)
-                        pong.extend(b ^ mask[i % 4] for i, b in enumerate(data))
-                        self.sock.sendall(pong)
-            except Exception:
-                self.close()
-            return {"op": "ping"}
-
-        if opcode == 0xA:
-            try:
-                self._read_payload(head)
-            except Exception:
-                self.close()
-            return {"op": "pong"}
-
-        try:
-            fin = bool(head[0] & 0x80)
-            payload = self._read_payload(head)
-            while not fin:
-                nxt = self._recv_exact(2)
-                chunk = self._read_payload(nxt)
-                if (nxt[0] & 0x0F) in (0x8, 0x9, 0xA):
-                    continue
-                payload += chunk
-                fin = bool(nxt[0] & 0x80)
-            if opcode == 0x2:
-                return {"op": "binary"}
-            return json.loads(payload.decode("utf-8"))
-        except Exception:
-            self.close()
-            return None
-
-    def _read_payload(self, head: bytes) -> bytes:
-        length = head[1] & 0x7F
-        if length == 126:
-            length = int.from_bytes(self._recv_exact(2), "big")
-        elif length == 127:
-            length = int.from_bytes(self._recv_exact(8), "big")
-        return self._recv_exact(length)
-
-    def close(self) -> None:
-        self.closed = True
-        with self._lock:
-            if self.sock:
-                try:
-                    self.sock.close()
-                except Exception:
-                    pass
-                self.sock = None
-
-
-class VoiceConnection:
-
-    def __init__(
-        self,
-        endpoint: str,
-        server_id: str,
-        user_id: str,
-        session_id: str,
-        token: str,
-        console: Console,
-        label: str = "voice",
-        is_stream: bool = False,
-        stream_key: str = "",
-        channel_id: str = "",
-    ) -> None:
-        cleaned = endpoint.replace("wss://", "").replace("https://", "").rstrip("/")
-        if ":" in cleaned:
-            self.host, port_str = cleaned.split(":", 1)
-            try:
-                self.port = int(port_str)
-            except ValueError:
-                self.port = 443
-        else:
-            self.host = cleaned
-            self.port = 443
-        self.endpoint = f"{self.host}:{self.port}"
-        self.server_id = server_id
-        self.user_id = user_id
-        self.session_id = session_id
-        self.token = token
-        self.console = console
-        self.label = label
-        self.is_stream = is_stream
-        self.stream_key = stream_key
-        self.channel_id = channel_id
-
-        self.ws: MiniWebSocket | None = None
-        self.udp_sock: socket.socket | None = None
-        self.ssrc: int = 0
-        self.voice_ip: str = ""
-        self.voice_port: int = 0
-        self.external_ip: str = ""
-        self.external_port: int = 0
-        self.secret_key: bytes = b""
-        self.encryption_mode: str = ""
-        self.heartbeat_interval: float = 13.75
-        self.running: bool = False
-        self.nonce_counter: int = 0
-        self._hb_thread: threading.Thread | None = None
-        self._audio_thread: threading.Thread | None = None
-
-    def connect(self) -> bool:
-        C = self.console
-
-        try:
-            self.ws = MiniWebSocket(self.host, port=self.port, path="/?v=7")
-            self.ws.connect()
-        except Exception as exc:
-            C.err(self.label, f"ws connect failed: {exc}")
-            self.close()
-            return False
-
-        msg = self._recv_op(8, timeout=10)
-        if not msg:
-            C.err(self.label, "no Hello from voice server")
-            self.close()
-            return False
-        self.heartbeat_interval = msg.get("d", {}).get("heartbeat_interval", 13750) / 1000.0
-
-        identify_d: dict[str, Any] = {
-            "server_id": self.server_id,
-            "user_id": self.user_id,
-            "session_id": self.session_id,
-            "token": self.token,
-            "max_dave_protocol_version": 1,
-        }
-        if self.channel_id:
-            identify_d["channel_id"] = self.channel_id
-        if self.is_stream:
-            identify_d["video"] = True
-            identify_d["streams"] = [
-                {"type": "screen", "rid": "100", "quality": 100}
-            ]
-        self.ws.send(json.dumps({"op": 0, "d": identify_d}))
-
-        msg = self._recv_op(2, timeout=10)
-        if not msg:
-            C.err(self.label, "no Ready from voice server")
-            self.close()
-            return False
-
-        d = msg.get("d", {})
-        self.ssrc = d.get("ssrc", 0)
-        self.voice_ip = d.get("ip", "")
-        self.voice_port = d.get("port", 0)
-        modes = d.get("modes", [])
-
-        preferred = [
-            "aead_aes256_gcm_rtpsize",
-            "aead_xchacha20_poly1305_rtpsize",
-            "xsalsa20_poly1305_lite",
-            "xsalsa20_poly1305",
-        ]
-        for mode in preferred:
-            if mode in modes:
-                self.encryption_mode = mode
-                break
-        if not self.encryption_mode and modes:
-            self.encryption_mode = modes[0]
-
-        if not self._udp_discovery():
-            C.warn(self.label, "UDP discovery failed, using fallback IP")
-            self.external_ip = "127.0.0.1"
-            self.external_port = random.randint(10000, 60000)
-
-        self.ws.send(json.dumps({
-            "op": 1,
-            "d": {
-                "protocol": "udp",
-                "data": {
-                    "address": self.external_ip,
-                    "port": self.external_port,
-                    "mode": self.encryption_mode,
-                },
-            },
-        }))
-
-        msg = self._recv_op(4, timeout=10)
-        if msg:
-            d = msg.get("d", {})
-            self.secret_key = bytes(d.get("secret_key", []))
-            self.encryption_mode = d.get("mode", self.encryption_mode)
-
-        self.running = True
-        return True
-
-    def _recv_op(self, target_op: int, timeout: float = 10) -> dict | None:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            remaining = max(0.1, deadline - time.time())
-            msg = self.ws.recv(timeout=min(remaining, 2.0))
-            if msg is None:
-                if self.ws.closed:
-                    return None
-                continue
-            if msg.get("op") == "close":
-                C = self.console
-                code = msg.get("code")
-                reason = msg.get("reason")
-                C.err(self.label, f"voice server closed: {code} ({reason})")
-                return None
-            if msg.get("op") == target_op:
-                return msg
-            if msg.get("op") == 3:
-                self._send_heartbeat()
-        return None
-
-    def _send_heartbeat(self) -> None:
-        if self.ws and not self.ws.closed:
-            try:
-                nonce = int(time.time() * 1000)
-                self.ws.send(json.dumps({"op": 3, "d": nonce}))
-            except Exception:
-                pass
-
-    def _udp_discovery(self) -> bool:
-        try:
-            self.udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.udp_sock.settimeout(5)
-
-            packet = bytearray(74)
-            struct.pack_into(">HHI", packet, 0, 0x0001, 70, self.ssrc)
-
-            self.udp_sock.sendto(bytes(packet), (self.voice_ip, self.voice_port))
-
-            data, _ = self.udp_sock.recvfrom(256)
-            if len(data) < 74:
-                return False
-
-            ip_start = 8
-            ip_end = data.index(0, ip_start)
-            self.external_ip = data[ip_start:ip_end].decode("utf-8")
-            self.external_port = struct.unpack_from(">H", data, 72)[0]
-
-            return bool(self.external_ip)
-        except Exception:
-            if self.udp_sock:
-                try:
-                    self.udp_sock.close()
-                except Exception:
-                    pass
-                self.udp_sock = None
-            return False
-
-    def start_heartbeat(self) -> None:
-        def _loop():
-            while self.running and self.ws and not self.ws.closed:
-                self._send_heartbeat()
-                try:
-                    msg = self.ws.recv(timeout=0.5)
-                    if msg and msg.get("op") == 3:
-                        self._send_heartbeat()
-                except Exception:
-                    pass
-                time.sleep(max(1.0, self.heartbeat_interval - 0.5))
-
-        self._hb_thread = threading.Thread(target=_loop, daemon=True)
-        self._hb_thread.start()
-
-    def send_speaking(self, speaking: bool = True) -> None:
-        if self.ws and not self.ws.closed:
-            try:
-                self.ws.send(json.dumps({
-                    "op": 5,
-                    "d": {
-                        "speaking": 1 if speaking else 0,
-                        "delay": 0,
-                        "ssrc": self.ssrc,
-                    },
-                }))
-            except Exception:
-                pass
-
-    def start_silence_pump(self) -> None:
-        if not self.udp_sock or not self.secret_key:
-            return
-
-        def _pump():
-            seq = 0
-            ts = 0
-            while self.running:
-                try:
-                    if HAS_CRYPTO and "aes256_gcm" in self.encryption_mode:
-                        self._send_encrypted_silence_gcm(seq, ts)
-                    else:
-                        keepalive = struct.pack(">I", seq) + b"\xc9"
-                        try:
-                            self.udp_sock.sendto(keepalive, (self.voice_ip, self.voice_port))
-                        except Exception:
-                            pass
-                    seq = (seq + 1) & 0xFFFF
-                    ts = (ts + 960) & 0xFFFFFFFF
-                    time.sleep(1.0)
-                except Exception:
-                    break
-
-        self._audio_thread = threading.Thread(target=_pump, daemon=True)
-        self._audio_thread.start()
-
-    def _send_encrypted_silence_gcm(self, seq: int, ts: int) -> None:
-        if not self.udp_sock or not self.secret_key:
-            return
-        try:
-            rtp_header = struct.pack(
-                ">BBHII",
-                0x80,
-                0x78,
-                seq & 0xFFFF,
-                ts & 0xFFFFFFFF,
-                self.ssrc,
-            )
-
-            self.nonce_counter += 1
-            nonce = struct.pack(">I", self.nonce_counter) + b"\x00" * 8
-
-            cipher = AESGCM(self.secret_key[:32])
-            encrypted = cipher.encrypt(nonce, OPUS_SILENCE, rtp_header)
-
-            packet = rtp_header + encrypted + struct.pack(">I", self.nonce_counter)
-            self.udp_sock.sendto(packet, (self.voice_ip, self.voice_port))
-        except Exception:
-            pass
-
-    def close(self) -> None:
-        self.running = False
-        if self.udp_sock:
-            try:
-                self.udp_sock.close()
-            except Exception:
-                pass
-        if self.ws:
-            self.ws.close()
-
-
-PERMISSION_ADMINISTRATOR = 1 << 3
-PERMISSION_STREAM        = 1 << 9
-PERMISSION_VIEW_CHANNEL  = 1 << 10
-PERMISSION_CONNECT       = 1 << 20
-PERMISSION_ALL           = (1 << 63) - 1
-STREAM_NEEDS = PERMISSION_VIEW_CHANNEL | PERMISSION_CONNECT | PERMISSION_STREAM
-STREAM_MARK = {True: "✓", False: "✗", None: "?"}
-STREAM_ORDER = {True: 0, None: 1, False: 2}
-_AFK_RE = re.compile(r"(?<![a-z])afk(?![a-z])", re.I)
-
-
-def is_afk_channel(channel_id: str, name: str, afk_id: str = "") -> bool:
-    return (bool(afk_id) and str(channel_id) == str(afk_id)) or bool(_AFK_RE.search(str(name or "")))
-
-
-def _perm_int(v: Any) -> int:
-    try:
-        return int(v)
-    except (TypeError, ValueError):
-        return 0
-
-
-def base_permissions(guild_id: str, owner_id: str, me_id: str, roles: Sequence[dict], member_roles: Sequence[str]) -> int:
-    if owner_id and owner_id == me_id:
-        return PERMISSION_ALL
-    by_id = {str(r.get("id")): _perm_int(r.get("permissions")) for r in roles}
-    base = by_id.get(str(guild_id), 0)
-    for rid in member_roles:
-        base |= by_id.get(str(rid), 0)
-    return PERMISSION_ALL if base & PERMISSION_ADMINISTRATOR else base
-
-
-def apply_overwrites(base: int, guild_id: str, me_id: str, member_roles: Sequence[str], overwrites: Sequence[dict]) -> int:
-    if base & PERMISSION_ADMINISTRATOR:
-        return PERMISSION_ALL
-    ow = {str(o.get("id")): o for o in overwrites}
-    perms = base
-    ev = ow.get(str(guild_id))
-    if ev:
-        perms = (perms & ~_perm_int(ev.get("deny"))) | _perm_int(ev.get("allow"))
-    allow = deny = 0
-    for rid in member_roles:
-        o = ow.get(str(rid))
-        if o:
-            allow |= _perm_int(o.get("allow"))
-            deny |= _perm_int(o.get("deny"))
-    perms = (perms & ~deny) | allow
-    mo = ow.get(str(me_id))
-    if mo:
-        perms = (perms & ~_perm_int(mo.get("deny"))) | _perm_int(mo.get("allow"))
-    return perms
-
-
-def stream_verdict(perms: int | None) -> bool | None:
-    if perms is None:
-        return None
-    return bool(perms & PERMISSION_ADMINISTRATOR) or (perms & STREAM_NEEDS) == STREAM_NEEDS
-
-
-def fetch_member_roles(token: str, super_props: str, guild_id: str, me_id: str) -> list[str] | None:
-    urls = [f"https://discord.com/api/v9/users/@me/guilds/{guild_id}/member"]
-    if me_id:
-        urls.append(f"https://discord.com/api/v9/guilds/{guild_id}/members/{me_id}")
-    for url in urls:
-        st, data = _discord_api_get(url, token, super_props)
-        if st == 200 and isinstance(data, dict) and isinstance(data.get("roles"), list):
-            return [str(x) for x in data["roles"]]
-    return None
-
-
-def _discord_api_get(url: str, token: str, super_props: str = "") -> tuple[int, dict]:
-    headers = {
-        "authorization": token,
-        "user-agent": USER_AGENT,
-    }
-    if super_props:
-        headers["x-super-properties"] = super_props
-    req = urllib.request.Request(url, headers=headers)
-    try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return resp.status, data
-    except urllib.error.HTTPError as exc:
-        try:
-            err_data = json.loads(exc.read().decode("utf-8"))
-        except Exception:
-            err_data = {"message": str(exc.reason)}
-        return exc.code, err_data
-    except Exception as exc:
-        return 0, {"message": str(exc)}
-
-
-def validate_stream_target(
-    token: str,
-    super_props: str,
-    guild_id: str,
-    channel_id: str,
-    console: Console,
-) -> tuple[bool, str]:
-    C = console
-
-    if not guild_id.isdigit():
-        C.err("server", f"invalid server ID format: '{guild_id}' (must be numeric digits)")
-        return False, "invalid server id format"
-    if not channel_id.isdigit():
-        C.err("channel", f"invalid channel ID format: '{channel_id}' (must be numeric digits)")
-        return False, "invalid channel id format"
-
-    status, user_data = _discord_api_get("https://discord.com/api/v9/users/@me", token, super_props)
-    if status == 401:
-        C.err("auth", "authentication failed: your discord token is invalid or has expired (HTTP 401).")
-        C.info(f"{C.GREY}please update your token using '{CREDENTIALS_MENU}' in the menu.{C.RESET}")
-        return False, "unauthorized"
-    if status != 200:
-        C.err("auth", f"could not reach discord API (HTTP {status}: {user_data.get('message', 'network error')})")
-        return False, "api error"
-
-    g_status, g_data = _discord_api_get(f"https://discord.com/api/v9/guilds/{guild_id}", token, super_props)
-    if g_status in (403, 404):
-        ug_status, ug_list = _discord_api_get("https://discord.com/api/v9/users/@me/guilds", token, super_props)
-        guild_found = None
-        if ug_status == 200 and isinstance(ug_list, list):
-            guild_found = next((g for g in ug_list if str(g.get("id")) == str(guild_id)), None)
-
-        if not guild_found:
-            C.err("server", f"server not found ({guild_id})")
-            C.err("server", "either this server does not exist or your account is not a member of it.")
-            return False, "server not found"
-        guild_name = guild_found.get("name", "Server")
-    elif g_status != 200:
-        C.err("server", f"server lookup failed (HTTP {g_status}: {g_data.get('message', 'unknown error')})")
-        return False, "server lookup error"
-    else:
-        guild_name = g_data.get("name", "Server")
-
-    C.ok("server", f"server verified: {C.WHITE}{guild_name}{C.RESET} ({guild_id})")
-
-    ch_status, ch_data = _discord_api_get(f"https://discord.com/api/v9/channels/{channel_id}", token, super_props)
-    if ch_status in (403, 404):
-        C.err("channel", f"channel not found ({channel_id})")
-        C.err("channel", "either this channel does not exist or your account lacks access to view it.")
-        return False, "channel not found"
-    elif ch_status != 200:
-        C.err("channel", f"channel lookup failed (HTTP {ch_status}: {ch_data.get('message', 'unknown error')})")
-        return False, "channel lookup error"
-
-    ch_name = ch_data.get("name", "channel")
-    ch_guild_id = str(ch_data.get("guild_id", ""))
-    ch_type = ch_data.get("type")
-    afk_id = str(g_data.get("afk_channel_id") or "") if g_status == 200 and isinstance(g_data, dict) else ""
-    if ch_type in (2, 13) and is_afk_channel(channel_id, ch_name, afk_id):
-        C.err("channel", f"'{ch_name}' is an AFK channel, AFK channels are skipped. Pick another voice channel.")
-        return False, "afk channel"
-
-    if ch_guild_id and ch_guild_id != str(guild_id):
-        C.err("channel", f"channel mismatch: channel '{ch_name}' belongs to server {ch_guild_id}, NOT {guild_id}.")
-        return False, "channel guild mismatch"
-
-    channel_type_names = {
-        0: "Text Channel",
-        2: "Voice Channel",
-        4: "Category",
-        5: "Announcement Channel",
-        13: "Stage Channel",
-        15: "Forum Channel",
-    }
-    if ch_type not in (2, 13):
-        type_name = channel_type_names.get(ch_type, f"Type {ch_type}")
-        C.err("channel", f"invalid channel type: '{ch_name}' is a {type_name}, NOT a Voice Channel.")
-        C.info(f"{C.GREY}hint: right-click a voice channel (speaker icon) in Discord -> Copy Channel ID.{C.RESET}")
-        return False, "not a voice channel"
-
-    type_name = "Stage Channel" if ch_type == 13 else "Voice Channel"
-    C.ok("channel", f"voice channel verified: {C.WHITE}#{ch_name}{C.RESET} ({type_name})")
-
-    raw_perms = ch_data.get("permissions")
-    if raw_perms is not None:
-        try:
-            perms = int(raw_perms)
-            is_admin = bool(perms & PERMISSION_ADMINISTRATOR)
-            can_view = is_admin or bool(perms & PERMISSION_VIEW_CHANNEL)
-            can_connect = is_admin or bool(perms & PERMISSION_CONNECT)
-            can_stream = is_admin or bool(perms & PERMISSION_STREAM)
-
-            if not can_view:
-                C.err("perms", f"missing permission: your account cannot view channel '#{ch_name}' (VIEW_CHANNEL missing).")
-                return False, "cannot view channel"
-            if not can_connect:
-                C.err("perms", f"missing permission: your account cannot connect to channel '#{ch_name}' (CONNECT missing).")
-                return False, "cannot connect"
-            if not can_stream:
-                C.err("perms", f"missing permission: your account cannot Go Live in channel '#{ch_name}' (STREAM / Video missing).")
-                C.info(f"{C.GREY}hint: a server administrator must grant your role 'Video / Go Live' permission.{C.RESET}")
-                return False, "cannot stream"
-
-            C.ok("perms", f"permissions verified: {C.GREEN}View Channel ✓ · Connect ✓ · Go Live (Stream) ✓{C.RESET}")
-            return True, f"server: {guild_name}, channel: #{ch_name}"
-        except Exception:
-            pass
-
-    C.ok("perms", "voice channel permissions check completed")
-    return True, f"server: {guild_name}, channel: #{ch_name}"
-
-
-
-def _summarize_guild(g: dict, me_id: str = "") -> dict:
-    props = g.get("properties") or {}
-    gid = str(g.get("id"))
-    afk_id = str(g.get("afk_channel_id") or props.get("afk_channel_id") or "")
-    owner_id = str(g.get("owner_id") or props.get("owner_id") or "")
-    chans = {str(c.get("id")): c for c in (g.get("channels") or []) if c.get("type") in (2, 13)}
-    names = {cid: c.get("name", "voice") for cid, c in chans.items() if not is_afk_channel(cid, c.get("name", ""), afk_id)}
-    member_roles = g.get("_member_roles")
-    roles = g.get("roles") or []
-    base = None
-    if me_id and owner_id == me_id:
-        base = PERMISSION_ALL
-    elif me_id and roles and member_roles is not None:
-        base = base_permissions(gid, owner_id, me_id, roles, member_roles)
-    counts: dict[str, int] = {}
-    for vs in g.get("voice_states") or []:
-        cid = str(vs.get("channel_id") or "")
-        if cid in names:
-            counts[cid] = counts.get(cid, 0) + 1
-    all_vcs = []
-    for cid in names:
-        ok = None
-        if base is not None:
-            ok = stream_verdict(apply_overwrites(base, gid, me_id, member_roles or [], chans[cid].get("permission_overwrites") or []))
-        all_vcs.append((cid, names[cid], counts.get(cid, 0), ok))
-    all_vcs.sort(key=lambda v: (STREAM_ORDER[v[3]], -v[2]))
-    vcs = [v for v in all_vcs if v[2] > 0]
-    best = min((STREAM_ORDER[v[3]] for v in vcs), default=2)
-    browse_best = min((STREAM_ORDER[v[3]] for v in all_vcs), default=2)
-    return {
-        "id": gid,
-        "name": g.get("name") or props.get("name") or "Unknown server",
-        "members": int(g.get("member_count") or props.get("member_count") or 0),
-        "vcs": vcs[:3],
-        "all_vcs": all_vcs,
-        "voice_total": sum(counts.values()),
-        "stream_rank": 2 - best,
-        "browse_rank": 2 - browse_best,
-        "complete": "channels" in g,
-    }
-
-
-def scan_busy_servers(token: str, props: dict, super_props: str, timeout: float = 15.0, limit: int = 3,
-                      debug: dict | None = None, all_out: list | None = None) -> list[dict]:
-    dbg = debug if debug is not None else {}
-    dbg.update(events={}, close=None, error="", guilds=0, with_channels=0, with_voice=0)
-    ws = MiniWebSocket(GATEWAY_URL, path="/?v=9&encoding=json")
-    raw: dict[str, dict] = {}
-    expected: set[str] = set()
-    got_ready, supp_at = False, 0.0
-    me_id = extract_account_snowflake(token)
-    hb_interval, last_hb, seq = 41.25, time.time(), None
-    deadline = time.time() + timeout
-
-    def done() -> bool:
-        return bool(expected) and all("channels" in raw[i] and "voice_states" in raw[i] for i in expected)
-
-    try:
-        ws.connect()
-        while time.time() < deadline:
-            if time.time() - last_hb > hb_interval:
-                ws.send(json.dumps({"op": 1, "d": seq}))
-                last_hb = time.time()
-            if (got_ready and done()) or (supp_at and time.time() - supp_at > 2.0):
-                break
-            msg = ws.recv(timeout=1.0)
-            if not msg:
-                if ws.closed:
-                    dbg["error"] = dbg["error"] or "connection closed"
-                    break
-                continue
-            op, t, d = msg.get("op"), msg.get("t"), msg.get("d") or {}
-            name = t or f"op{op}"
-            dbg["events"][name] = dbg["events"].get(name, 0) + 1
-            if op == "close":
-                dbg["close"] = (msg.get("code"), msg.get("reason"))
-                break
-            if msg.get("s") is not None:
-                seq = msg["s"]
-            if op == 10:
-                hb_interval = d.get("heartbeat_interval", 41250) / 1000.0
-                ws.send(json.dumps({"op": 1, "d": seq}))
-                last_hb = time.time()
-                ws.send(json.dumps({"op": 2, "d": {
-                    "token": token, "capabilities": 16381, "properties": props,
-                    "presence": {"status": "invisible", "since": 0, "activities": [], "afk": False},
-                }}))
-            elif op == 0 and t == "READY":
-                got_ready = True
-                me_id = str((d.get("user") or {}).get("id") or me_id)
-                merged = d.get("merged_members") or []
-                for i, g in enumerate(d.get("guilds") or []):
-                    gid = str(g.get("id"))
-                    entry = raw.setdefault(gid, {"id": gid})
-                    entry.update(g)
-                    expected.add(gid)
-                    row = merged[i] if i < len(merged) and isinstance(merged[i], list) else []
-                    mine = next((m for m in row if isinstance(m, dict) and str(m.get("user_id") or (m.get("user") or {}).get("id") or "") == me_id), None)
-                    if mine is None and row and isinstance(row[0], dict):
-                        mine = row[0]
-                    if mine and isinstance(mine.get("roles"), list):
-                        entry["_member_roles"] = [str(x) for x in mine["roles"]]
-            elif op == 0 and t == "READY_SUPPLEMENTAL":
-                for g in d.get("guilds") or []:
-                    gid = str(g.get("id"))
-                    raw.setdefault(gid, {"id": gid})["voice_states"] = g.get("voice_states") or []
-                supp_at = time.time()
-            elif op == 0 and t == "GUILD_CREATE":
-                gid = str(d.get("id"))
-                raw.setdefault(gid, {"id": gid}).update(d)
-    except Exception as exc:
-        dbg["error"] = repr(exc)
-    finally:
-        ws.close()
-
-    infos = [_summarize_guild(g, me_id) for g in raw.values()]
-    if all_out is not None:
-        all_out.extend(infos)
-    dbg.update(
-        guilds=len(raw),
-        with_channels=sum(1 for g in raw.values() if "channels" in g),
-        with_voice=sum(1 for g in raw.values() if g.get("voice_states")),
-    )
-    ranked = [g for g in infos if g["vcs"]]
-    ranked.sort(key=lambda g: (g["stream_rank"], g["vcs"][0][2], g["voice_total"], g["members"]), reverse=True)
-    ranked = ranked[:limit]
-    if any(not g["members"] for g in ranked):
-        st, data = _discord_api_get("https://discord.com/api/v9/users/@me/guilds?with_counts=true", token, super_props)
-        if st == 200 and isinstance(data, list):
-            approx = {str(x.get("id")): x.get("approximate_member_count", 0) for x in data}
-            for g in ranked:
-                g["members"] = g["members"] or int(approx.get(g["id"], 0) or 0)
-    return ranked
-
-
-def rest_guild_vcs(token: str, super_props: str, g: dict, me_id: str, limit: int | None = None) -> list[tuple] | None:
-    gid = str(g["id"])
-    cst, chans = _discord_api_get(f"https://discord.com/api/v9/guilds/{gid}/channels", token, super_props)
-    if cst != 200 or not isinstance(chans, list):
-        return None
-    gst, gfull = _discord_api_get(f"https://discord.com/api/v9/guilds/{gid}", token, super_props)
-    afk_id = str(gfull.get("afk_channel_id") or "") if gst == 200 and isinstance(gfull, dict) else ""
-    cands = sorted(
-        (c for c in chans if c.get("type") in (2, 13) and not is_afk_channel(str(c.get("id")), c.get("name", ""), afk_id)),
-        key=lambda c: c.get("position", 0),
-    )[:limit]
-    base = PERMISSION_ALL if g.get("owner") else None
-    if base is None and g.get("permissions") is not None:
-        base = _perm_int(g.get("permissions"))
-    member_roles, fetched = None, False
-    vcs = []
-    for c in cands:
-        ow = c.get("permission_overwrites") or []
-        ok = None
-        if base is not None:
-            if base & PERMISSION_ADMINISTRATOR or not ow:
-                ok = stream_verdict(base)
-            else:
-                if not fetched:
-                    member_roles, fetched = fetch_member_roles(token, super_props, gid, me_id), True
-                if member_roles is not None:
-                    ok = stream_verdict(apply_overwrites(base, gid, me_id, member_roles, ow))
-        vcs.append((str(c["id"]), c.get("name", "voice"), None, ok))
-    vcs.sort(key=lambda v: STREAM_ORDER[v[3]])
-    return vcs
-
-
-def rest_active_servers(token: str, super_props: str, limit: int = 3) -> list[dict]:
-    st, data = _discord_api_get("https://discord.com/api/v9/users/@me/guilds?with_counts=true", token, super_props)
-    if st != 200 or not isinstance(data, list):
-        return []
-    me_id = extract_account_snowflake(token)
-    data.sort(key=lambda g: (g.get("approximate_presence_count") or 0, g.get("approximate_member_count") or 0), reverse=True)
-    out: list[dict] = []
-    for g in data[:10]:
-        vcs = rest_guild_vcs(token, super_props, g, me_id, limit=6)
-        if not vcs:
-            continue
-        out.append({
-            "id": str(g["id"]), "name": g.get("name", "Unknown server"),
-            "members": int(g.get("approximate_member_count") or 0), "online": int(g.get("approximate_presence_count") or 0),
-            "vcs": vcs[:3], "voice_total": 0,
-        })
-    out.sort(key=lambda r: 0 if any(v[3] is not False for v in r["vcs"]) else 1)
-    return out[:limit]
-
-
-def format_recommendation(r: dict) -> str:
-    members = f"{r['members']:,} members" if r["members"] else "members n/a"
-    vcs = ", ".join((f"{name} ({n})" if n is not None else name) + f" {STREAM_MARK[ok]}" for _cid, name, n, ok in r["vcs"])
-    online = f" • {r['online']:,} online" if r.get("online") else ""
-    tag = "Recommended" if any(v[3] is not False for v in r["vcs"]) else "No stream access"
-    return f"{tag} {r['name']} • {members}{online} • {vcs}"
-
-
-def resolve_server(token: str, super_props: str, text: str) -> tuple[str, str]:
-    if text.isdigit():
-        return text, ""
-    st, data = _discord_api_get("https://discord.com/api/v9/users/@me/guilds", token, super_props)
-    if st != 200 or not isinstance(data, list):
-        return "", f"could not list your servers (HTTP {st})"
-    hits = [g for g in data if str(g.get("name", "")).lower() == text.lower()]
-    if not hits:
-        return "", f"no server named '{text}' in your account"
-    if len(hits) > 1:
-        return "", f"{len(hits)} servers are named '{text}', use the server id instead"
-    return str(hits[0]["id"]), ""
-
-
-def resolve_voice_channel(token: str, super_props: str, guild_id: str, text: str) -> tuple[str, str]:
-    if text.isdigit():
-        return text, ""
-    st, data = _discord_api_get(f"https://discord.com/api/v9/guilds/{guild_id}/channels", token, super_props)
-    if st != 200 or not isinstance(data, list):
-        return "", f"could not list channels (HTTP {st})"
-    hits = [c for c in data if c.get("type") in (2, 13) and str(c.get("name", "")).lower() == text.lower()]
-    if not hits:
-        return "", f"no voice channel named '{text}' in that server"
-    if len(hits) > 1:
-        return "", f"{len(hits)} voice channels are named '{text}', use the channel id instead"
-    return str(hits[0]["id"]), ""
-
-
-class GatewayStreamEngine:
-
-    def __init__(self, state: AccountSessionState, session: RuntimeClientContext, console: Console) -> None:
-        self.state = state
-        self.session = session
-        self.console = console
-        self.ws: MiniWebSocket | None = None
-        self.voice_conn: VoiceConnection | None = None
-        self.stream_conn: VoiceConnection | None = None
-        self.running = False
-        self.heartbeat_interval = 41.25
-        self.sequence: int | None = None
-        self.start_time = 0.0
-
-        self.gateway_session_id = ""
-        self.user_id = ""
-        self.stream_key = ""
-
-        self.voice_session_id = ""
-        self.voice_token = ""
-        self.voice_endpoint = ""
-        self.voice_connected = False
-
-        self.stream_token = ""
-        self.stream_endpoint = ""
-        self._rtc_server_id = ""
-        self._rtc_channel_id = ""
-        self._ack_ws = None
-        self._last_ack = 0.0
-        self.stream_connected = False
-        self.stream_ever_active = False
-        self._stream_recreate_attempts = 0
-        self._user_left_vc = False
-        self._rotating = False
-        self._segment_start = 0.0
-        self.on_live = None
-
-        self._status_thread: threading.Thread | None = None
-
-    def start_stream(self, guild_id: str, channel_id: str, max_seconds: float = 0.0) -> None:
-        C = self.console
-        C.rule()
-        C.info(f"{C.MAGENTA}Headless Gateway Live Streamer{C.WHITE}")
-        C.rule()
-        C.info("connecting to discord gateway (wss://gateway.discord.gg)...")
-
-        self.ws = MiniWebSocket(GATEWAY_URL, path="/?v=9&encoding=json")
-        try:
-            self.ws.connect()
-        except Exception as exc:
-            C.err("gateway", f"connection failed: {exc}")
-            C.rule()
-            input(f"  {C.ORANGE}›{C.RESET} press enter to return to menu")
-            return
-
-        C.ok("gateway", "connected")
-        self.running = True
-        self.start_time = time.time()
-        self.user_id = _user_id_from_token(self.state.token) or ""
-        self.stream_ever_active = False
-        self._stream_recreate_attempts = 0
-        self._user_left_vc = False
-        self._rotating = False
-        self._segment_start = 0.0
-
-        event_thread = threading.Thread(
-            target=self._event_loop,
-            args=(guild_id, channel_id),
-            daemon=True,
-        )
-        event_thread.start()
-
-        self._status_thread = threading.Thread(
-            target=self._status_display,
-            daemon=True,
-        )
-        self._status_thread.start()
-
-        print()
-        C.info(f"{C.GREY}press enter at any time to stop streaming...{C.RESET}")
-        deadline = (self.start_time + max_seconds) if max_seconds > 0 else 0.0
-        if deadline:
-            C.info(f"{C.GREY}auto stop after {max_seconds / 3600.0:g}h{C.RESET}")
-        C.rule()
-        if os.name != "nt" and sys.stdin.isatty():
-            self._wait_for_enter_posix(deadline)
-            self._cleanup(guild_id)
-            return
-        try:
-            import msvcrt
-            while self.running:
-                if msvcrt.kbhit():
-                    ch = msvcrt.getch()
-                    if ch in (b'\r', b'\n', b'\x03'):
-                        break
-                if deadline and time.time() >= deadline:
-                    C.info("requested stream time reached, stopping...")
-                    break
-                time.sleep(0.1)
-        except Exception:
-            while self.running:
-                if deadline and time.time() >= deadline:
-                    C.info("requested stream time reached, stopping...")
-                    break
-                time.sleep(0.5)
-
-        self._cleanup(guild_id)
-
-    def _wait_for_enter_posix(self, deadline: float) -> None:
-        C = self.console
-        import termios
-        import tty
-        fd = sys.stdin.fileno()
-        old = termios.tcgetattr(fd)
-
-        def restore_and_exit(signum, frame):
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            signal.signal(signum, previous[signum])
-            os.kill(os.getpid(), signum)
-        previous = {sig: signal.signal(sig, restore_and_exit) for sig in (signal.SIGTERM, signal.SIGHUP)}
-        try:
-            tty.setcbreak(fd)
-            while self.running:
-                if select.select([fd], [], [], 0.1)[0]:
-                    key = os.read(fd, 1)
-                    if not key or key in (b"\r", b"\n"):
-                        break
-                if deadline and time.time() >= deadline:
-                    C.info("requested stream time reached, stopping...")
-                    break
-        except KeyboardInterrupt:
-            pass
-        finally:
-            termios.tcsetattr(fd, termios.TCSADRAIN, old)
-            for sig, handler in previous.items():
-                signal.signal(sig, handler)
-
-    def _status_display(self) -> None:
-        while self.running:
-            time.sleep(60)
-            if not self.running:
-                break
-            elapsed = time.time() - self.start_time
-            hours = elapsed / 3600.0
-            mins = int(elapsed / 60)
-            if self.stream_connected:
-                status = f"{self.console.MAGENTA}🔴 LIVE{self.console.RESET}"
-            elif self.voice_connected:
-                status = f"{self.console.CYAN}⏳ starting stream{self.console.RESET}"
-            else:
-                status = f"{self.console.YELLOW}⏳ reconnecting{self.console.RESET}"
-            self.console.live(
-                "stream",
-                f"{status} · {mins}m ({hours:.2f}h) elapsed"
-            )
-
-    def _reconnect(self, guild_id: str, channel_id: str, can_resume: bool = True) -> bool:
-        C = self.console
-        if not self.running:
-            return False
-
-        self.stream_connected = False
-        self.voice_connected = False
-
-        if self.stream_conn:
-            try:
-                self.stream_conn.close()
-            except Exception:
-                pass
-            self.stream_conn = None
-
-        if self.voice_conn:
-            try:
-                self.voice_conn.close()
-            except Exception:
-                pass
-            self.voice_conn = None
-
-        if self.ws:
-            try:
-                self.ws.close()
-            except Exception:
-                pass
-            self.ws = None
-
-        attempts = 0
-        backoff = 3
-        while self.running:
-            attempts += 1
-            C.warn("gateway", f"reconnecting to gateway in {backoff}s (attempt {attempts})...")
-            for _ in range(backoff * 10):
-                if not self.running:
-                    return False
-                time.sleep(0.1)
-
-            try:
-                self.ws = MiniWebSocket(GATEWAY_URL, path="/?v=9&encoding=json")
-                self.ws.connect()
-
-                hello_msg = None
-                for _ in range(15):
-                    m = self.ws.recv(timeout=1.0)
-                    if isinstance(m, dict) and m.get("op") == "close":
-                        code = m.get("code")
-                        reason = m.get("reason", "")
-                        if code == 4004:
-                            C.err("auth", "fatal gateway authentication failure (code 4004: invalid token)")
-                            C.err("auth", f"please use '{CREDENTIALS_MENU}' in the menu to update your token.")
-                            self.running = False
-                            return False
-                    if m and m.get("op") == 10:
-                        hello_msg = m
-                        break
-                    time.sleep(0.1)
-
-                if not hello_msg:
-                    C.warn("gateway", "did not receive hello from gateway, retrying...")
-                    self.ws.close()
-                    self.ws = None
-                    backoff = min(15, backoff + 2)
-                    continue
-
-                d_hello = hello_msg.get("d", {})
-                self.heartbeat_interval = d_hello.get("heartbeat_interval", 41250) / 1000.0
-
-                self.ws.send(json.dumps({"op": 1, "d": self.sequence}))
-
-                resumed = False
-                if can_resume and self.gateway_session_id and self.sequence is not None:
-                    C.info("attempting to resume gateway session (op 6)...")
-                    try:
-                        self.ws.send(json.dumps({
-                            "op": 6,
-                            "d": {
-                                "token": self.state.token,
-                                "session_id": self.gateway_session_id,
-                                "seq": self.sequence,
-                            },
-                        }))
-
-                        res_msg = self.ws.recv(timeout=4.0)
-                        if res_msg:
-                            op_res = res_msg.get("op")
-                            t_res = res_msg.get("t")
-                            if op_res == 0 and t_res == "RESUMED":
-                                C.ok("gateway", "session resumed successfully")
-                                resumed = True
-                            elif op_res == 9:
-                                C.warn("gateway", "resume failed (invalid session), falling back to identify")
-                                time.sleep(1.0)
-                            elif op_res == 0 and t_res == "READY":
-                                self._handle_dispatch("READY", res_msg.get("d", {}), guild_id, channel_id)
-                                resumed = True
-                    except Exception:
-                        resumed = False
-
-                if not resumed:
-                    C.info("sending identify (op 2)...")
-                    self.ws.send(json.dumps({
-                        "op": 2,
-                        "d": {
-                            "token": self.state.token,
-                            "capabilities": 16381,
-                            "properties": self.session.props_dict,
-                            "presence": {
-                                "status": "online",
-                                "since": 0,
-                                "activities": [],
-                                "afk": False,
-                            },
-                        },
-                    }))
-
-                    test_msg = self.ws.recv(timeout=2.0)
-                    if isinstance(test_msg, dict) and test_msg.get("op") == "close":
-                        code = test_msg.get("code")
-                        if code == 4004:
-                            C.err("auth", "fatal gateway authentication failure (code 4004: invalid token)")
-                            C.err("auth", f"please use '{CREDENTIALS_MENU}' in the menu to update your token.")
-                            self.running = False
-                            return False
-                    elif isinstance(test_msg, dict) and test_msg.get("op") == 0 and test_msg.get("t") == "READY":
-                        self._handle_dispatch("READY", test_msg.get("d", {}), guild_id, channel_id)
-                        resumed = True
-
-                if resumed:
-                    self.ws.send(json.dumps({
-                        "op": 4,
-                        "d": {
-                            "guild_id": guild_id,
-                            "channel_id": channel_id,
-                            "self_mute": False,
-                            "self_deaf": False,
-                            "self_video": False,
-                        },
-                    }))
-                    C.ok("voice", f"re-joining voice channel {C.ORANGE}{channel_id}{C.RESET}")
-
-                C.ok("gateway", "gateway reconnected successfully")
-                return True
-
-            except Exception as exc:
-                C.warn("gateway", f"reconnect attempt {attempts} failed: {exc}")
-                if self.ws:
-                    self.ws.close()
-                    self.ws = None
-                backoff = min(15, backoff + 2)
-
-        return False
-
-    def _event_loop(self, guild_id: str, channel_id: str) -> None:
-        last_hb = time.time()
-
-        while self.running:
-            try:
-                if not self.ws or self.ws.closed:
-                    if not self._reconnect(guild_id, channel_id):
-                        break
-                    last_hb = time.time()
-                    continue
-
-                now = time.time()
-
-                if self._ack_ws is not self.ws:
-                    self._ack_ws = self.ws
-                    self._last_ack = now
-                elif now - self._last_ack > self.heartbeat_interval * 3:
-                    self.console.warn("gateway", "no heartbeat ack, reconnecting")
-                    self._last_ack = now
-                    if not self._reconnect(guild_id, channel_id):
-                        break
-                    last_hb = time.time()
-                    continue
-
-                if now - last_hb > self.heartbeat_interval:
-                    if self.ws and not self.ws.closed:
-                        try:
-                            self.ws.send(json.dumps({"op": 1, "d": self.sequence}))
-                            last_hb = now
-                        except Exception as exc:
-                            self.console.warn("gateway", f"heartbeat failed ({exc})")
-                            if not self._reconnect(guild_id, channel_id):
-                                break
-                            last_hb = time.time()
-                            continue
-
-                if (self.stream_connected and not self._rotating and self._segment_start
-                        and now - self._segment_start >= STREAM_ROTATE_SEC):
-                    self._rotate_stream(guild_id, channel_id)
-                    last_hb = time.time()
-                    continue
-
-                msg = self.ws.recv(timeout=1.0)
-                if not msg:
-                    continue
-
-                if isinstance(msg, dict) and msg.get("op") == "close":
-                    code = msg.get("code")
-                    reason = msg.get("reason", "")
-                    self.console.warn("gateway", f"gateway closed connection (code {code}: {reason})")
-                    if code == 4004:
-                        self.console.err("auth", "fatal: gateway authentication failed (code 4004: invalid token)")
-                        self.console.err("auth", f"please use '{CREDENTIALS_MENU}' in the menu to update your token.")
-                        self.running = False
-                        break
-                    elif code in (4010, 4011, 4012, 4013, 4014):
-                        self.console.err("gateway", f"fatal gateway error (code {code}: {reason}) — stopping.")
-                        self.running = False
-                        break
-
-                    if not self._reconnect(guild_id, channel_id):
-                        break
-                    last_hb = time.time()
-                    continue
-
-                op = msg.get("op")
-                seq = msg.get("s")
-                t = msg.get("t")
-                d = msg.get("d") or {}
-
-                if seq is not None:
-                    self.sequence = seq
-
-                if op == 10:
-                    self.heartbeat_interval = d.get("heartbeat_interval", 41250) / 1000.0
-                    last_hb = time.time()
-
-                    self.ws.send(json.dumps({"op": 1, "d": self.sequence}))
-
-                    self.ws.send(json.dumps({
-                        "op": 2,
-                        "d": {
-                            "token": self.state.token,
-                            "capabilities": 16381,
-                            "properties": self.session.props_dict,
-                            "presence": {
-                                "status": "online",
-                                "since": 0,
-                                "activities": [],
-                                "afk": False,
-                            },
-                        },
-                    }))
-
-                elif op == 1:
-                    self.ws.send(json.dumps({"op": 1, "d": self.sequence}))
-                    last_hb = now
-
-                elif op == 11:
-                    self._last_ack = time.time()
-
-                elif op == 0:
-                    if t == "RESUMED":
-                        self.console.ok("gateway", "gateway session resumed successfully")
-                        self.ws.send(json.dumps({
-                            "op": 4,
-                            "d": {
-                                "guild_id": guild_id,
-                                "channel_id": channel_id,
-                                "self_mute": False,
-                                "self_deaf": False,
-                                "self_video": False,
-                            },
-                        }))
-                    else:
-                        self._handle_dispatch(t, d, guild_id, channel_id)
-
-                elif op == 7:
-                    self.console.warn("gateway", "discord requested gateway reconnect (op 7)")
-                    if not self._reconnect(guild_id, channel_id, can_resume=True):
-                        break
-                    last_hb = time.time()
-
-                elif op == 9:
-                    resumable = bool(d)
-                    self.console.warn("gateway", f"session invalidated (op 9, resumable={resumable})")
-                    if not self._reconnect(guild_id, channel_id, can_resume=resumable):
-                        break
-                    last_hb = time.time()
-
-            except Exception as exc:
-                if not self.running:
-                    break
-                self.console.warn("gateway", f"connection dropped: {exc}")
-                if not self._reconnect(guild_id, channel_id):
-                    break
-                last_hb = time.time()
-
-    def _rotate_stream(self, guild_id: str, channel_id: str) -> None:
-        C = self.console
-        C.warn("stream", "4h reached, leaving and rejoining before Discord's 5h limit...")
-        self._rotating = True
-        self._segment_start = time.time()
-        self.stream_connected = False
-        self.voice_connected = False
-        if self.stream_key:
-            self.ws.send(json.dumps({"op": 19, "d": {"stream_key": self.stream_key}}))
-        self.ws.send(json.dumps({
-            "op": 4,
-            "d": {"guild_id": guild_id, "channel_id": None, "self_mute": False, "self_deaf": False, "self_video": False},
-        }))
-        for conn in (self.stream_conn, self.voice_conn):
-            if conn:
-                conn.close()
-        self.stream_conn = None
-        self.voice_conn = None
-        self.stream_token = ""
-        self.stream_endpoint = ""
-        time.sleep(STREAM_REJOIN_GAP_SEC)
-        self.ws.send(json.dumps({
-            "op": 4,
-            "d": {"guild_id": guild_id, "channel_id": channel_id, "self_mute": False, "self_deaf": False, "self_video": False},
-        }))
-        C.ok("voice", f"rejoining voice channel {C.ORANGE}{channel_id}{C.RESET}")
-
-    def _open_stream_conn(self, channel_id: str) -> None:
-        C = self.console
-        if self.stream_conn or not self.stream_endpoint or not self.stream_token or not self._rtc_server_id:
-            return
-        conn = VoiceConnection(
-            endpoint=self.stream_endpoint,
-            server_id=self._rtc_server_id,
-            user_id=self.user_id,
-            session_id=self.voice_session_id or self.gateway_session_id,
-            token=self.stream_token,
-            console=C,
-            label="stream",
-            is_stream=True,
-            stream_key=self.stream_key,
-            channel_id=self._rtc_channel_id or channel_id,
-        )
-        C.info("opening stream media connection...")
-        if not conn.connect():
-            C.err("stream", "stream media handshake FAILED")
-            return
-        self.stream_conn = conn
-        conn.start_heartbeat()
-        try:
-            conn.ws.send(json.dumps({"op": 5, "d": {"speaking": 1, "delay": 0, "ssrc": 0}}))
-            video_ssrc = conn.ssrc + 1
-            rtx_ssrc = conn.ssrc + 2
-            conn.ws.send(json.dumps({
-                "op": 12,
-                "d": {
-                    "audio_ssrc": conn.ssrc,
-                    "video_ssrc": video_ssrc,
-                    "rtx_ssrc": rtx_ssrc,
-                    "streams": [
-                        {
-                            "type": "screen",
-                            "rid": "100",
-                            "ssrc": video_ssrc,
-                            "rtx_ssrc": rtx_ssrc,
-                            "active": True,
-                            "quality": 100,
-                            "max_bitrate": 8000000,
-                            "max_framerate": 30,
-                            "max_resolution": {"type": "fixed", "width": 1920, "height": 1080},
-                        }
-                    ],
-                },
-            }))
-        except Exception as exc:
-            C.warn("stream", f"video announce error: {exc}")
-        C.ok("stream", f"stream media connection established (ssrc={conn.ssrc})")
-
-    def _handle_dispatch(self, event_type: str, d: dict, guild_id: str, channel_id: str) -> None:
-        C = self.console
-
-        if event_type == "READY":
-            self.gateway_session_id = d.get("session_id", "")
-            user_data = d.get("user", {})
-            username = user_data.get("username", "?")
-            self.user_id = str(user_data.get("id", self.user_id))
-            C.ok("auth", f"gateway authenticated ({username})")
-
-            self.ws.send(json.dumps({
-                "op": 4,
-                "d": {
-                    "guild_id": guild_id,
-                    "channel_id": channel_id,
-                    "self_mute": False,
-                    "self_deaf": False,
-                    "self_video": False,
-                },
-            }))
-            C.ok("voice", f"joining voice channel {C.ORANGE}{channel_id}{C.RESET}")
-
-        elif event_type == "VOICE_STATE_UPDATE":
-            if str(d.get("user_id")) == str(self.user_id):
-                active_channel = d.get("channel_id")
-                new_session = d.get("session_id", "")
-                if new_session:
-                    self.voice_session_id = new_session
-
-                if self._rotating:
-                    if active_channel is None:
-                        return
-                    if str(active_channel) == str(channel_id):
-                        self._rotating = False
-
-                if (self.voice_connected or self.stream_connected or self.stream_ever_active):
-                    if active_channel is None:
-                        C.warn("voice", "user manually disconnected from voice channel in Discord app")
-                        C.info("gracefully stopping stream engine and saving accumulated stream hours...")
-                        self._user_left_vc = True
-                        self.voice_connected = False
-                        self.stream_connected = False
-                        self.running = False
-                        return
-
-                    if str(active_channel) != str(channel_id):
-                        C.warn("voice", f"user moved to another voice channel ({active_channel}) in Discord app")
-                        C.info("stopping stream on old channel and saving accumulated stream hours...")
-                        self._user_left_vc = True
-                        self.voice_connected = False
-                        self.stream_connected = False
-                        self.running = False
-                        return
-
-                C.ok("voice", f"voice state updated (session: {self.voice_session_id[:8]}...)")
-
-        elif event_type == "VOICE_SERVER_UPDATE":
-            token = d.get("token", "")
-            endpoint = d.get("endpoint") or ""
-            v_guild = d.get("guild_id", guild_id)
-
-            if not endpoint or not token:
-                C.err("voice", "empty voice server endpoint/token")
-                return
-
-            if self.voice_connected:
-                C.warn("voice", "voice server update received, re-establishing voice connection...")
-                if self.voice_conn:
-                    self.voice_conn.close()
-                self.voice_connected = False
-
-            self.voice_token = token
-            self.voice_endpoint = endpoint
-            C.ok("voice", f"voice server: {endpoint}")
-
-            session_id = self.voice_session_id or self.gateway_session_id
-            self.voice_conn = VoiceConnection(
-                endpoint=self.voice_endpoint,
-                server_id=v_guild,
-                user_id=self.user_id,
-                session_id=session_id,
-                token=self.voice_token,
-                console=C,
-                label="voice",
-                is_stream=False,
-                channel_id=channel_id,
-            )
-
-            C.info("performing voice WebSocket handshake...")
-            if self.voice_conn.connect():
-                self.voice_conn.start_heartbeat()
-                self.voice_conn.send_speaking(False)
-                self.voice_conn.start_silence_pump()
-                self.voice_connected = True
-                C.ok("voice", f"{C.GREEN}voice connection established (ssrc={self.voice_conn.ssrc}){C.RESET}")
-
-                time.sleep(0.5)
-                C.info("requesting Go Live stream (op 18 Stream Create)...")
-                try:
-                    self.ws.send(json.dumps({
-                        "op": 18,
-                        "d": {
-                            "type": "guild",
-                            "guild_id": guild_id,
-                            "channel_id": channel_id,
-                            "preferred_region": None,
-                        },
-                    }))
-                except Exception as exc:
-                    C.warn("stream", f"stream create send error: {exc}")
-            else:
-                C.err("voice", "voice WebSocket handshake FAILED, retrying in 3s...")
-                def _retry_voice():
-                    time.sleep(3.0)
-                    if self.running and self.ws and not self.ws.closed:
-                        try:
-                            self.ws.send(json.dumps({
-                                "op": 4,
-                                "d": {
-                                    "guild_id": guild_id,
-                                    "channel_id": channel_id,
-                                    "self_mute": False,
-                                    "self_deaf": False,
-                                    "self_video": False,
-                                },
-                            }))
-                        except Exception:
-                            pass
-                threading.Thread(target=_retry_voice, daemon=True).start()
-
-        elif event_type == "STREAM_CREATE":
-            self.stream_key = d.get("stream_key", "")
-            self._rtc_server_id = str(d.get("rtc_server_id") or "")
-            self._rtc_channel_id = str(d.get("rtc_channel_id") or "")
-            C.ok("stream", f"Go Live created! stream_key: {C.CYAN}{self.stream_key}{C.RESET}")
-            first_live = not self.stream_ever_active
-            self.stream_connected = True
-            self.stream_ever_active = True
-            self._stream_recreate_attempts = 0
-            self._rotating = False
-            self._segment_start = time.time()
-            if first_live and self.on_live:
-                try:
-                    self.on_live()
-                except Exception as exc:
-                    C.warn("watcher", f"could not start the watcher: {exc}")
-
-            try:
-                self.ws.send(json.dumps({"op": 22, "d": {"stream_key": self.stream_key, "paused": False}}))
-            except Exception as exc:
-                C.warn("stream", f"stream set paused send error: {exc}")
-            self._open_stream_conn(channel_id)
-
-            print()
-            C.rule()
-            C.live("stream", f"{C.MAGENTA}● BROADCASTING LIVE{C.RESET}, discord shows your account as {C.MAGENTA}LIVE{C.RESET}")
-            C.rule()
-            print(f"  {C.YELLOW}⚠️  CRITICAL REQUIREMENTS FOR STREAM TIME TO ACCUMULATE:{C.RESET}")
-            print(f"  {C.ORANGE}1.{C.RESET} {C.WHITE}An alt account (or friend) {C.YELLOW}MUST be in the voice channel{C.RESET}{C.WHITE} sitting or watching.{C.RESET}")
-            print(f"     {C.GREY}› Discord will NOT count streaming hours if you stream alone in an empty channel!{C.RESET}")
-            print(f"  {C.ORANGE}2.{C.RESET} {C.WHITE}Ensure {C.YELLOW}'Use data to personalize my Discord experience'{C.RESET}{C.WHITE} is turned {C.GREEN}ON{C.RESET}{C.WHITE}.{C.RESET}")
-            print(f"     {C.GREY}› Check in Discord: User Settings (⚙) → Data & Privacy → Personalization.{C.RESET}")
-            C.rule()
-            if HAS_CRYPTO and self.voice_conn and self.voice_conn.secret_key:
-                C.ok("audio", "encrypted silence pump active (cryptography lib found)")
-            else:
-                tip = "use install.sh" if SYSTEM_PYTHON_POSIX else "pip install cryptography"
-                C.info(f"{C.GREY}tip: {tip} (enables encrypted audio frames){C.RESET}")
-
-        elif event_type == "STREAM_SERVER_UPDATE":
-            token = d.get("token", "")
-            endpoint = d.get("endpoint") or ""
-            if endpoint and token:
-                self.stream_token = token
-                self.stream_endpoint = endpoint
-                C.ok("stream", f"stream media route: {endpoint}")
-                self._open_stream_conn(channel_id)
-
-        elif event_type == "STREAM_DELETE":
-            self.stream_connected = False
-            if self.stream_conn:
-                self.stream_conn.close()
-                self.stream_conn = None
-            self.stream_token = ""
-            self.stream_endpoint = ""
-
-            if not self.running or not self.voice_connected or self._user_left_vc or self._rotating:
-                return
-
-            if self._stream_recreate_attempts < 3:
-                self._stream_recreate_attempts += 1
-                C.warn("stream", f"stream stopped by server, re-requesting Go Live in 2s (attempt {self._stream_recreate_attempts}/3)...")
-                def _recreate():
-                    time.sleep(2.0)
-                    if self.running and self.ws and not self.ws.closed and self.voice_connected and not self._user_left_vc:
-                        try:
-                            self.ws.send(json.dumps({
-                                "op": 18,
-                                "d": {
-                                    "type": "guild",
-                                    "guild_id": guild_id,
-                                    "channel_id": channel_id,
-                                    "preferred_region": None,
-                                },
-                            }))
-                        except Exception:
-                            pass
-                threading.Thread(target=_recreate, daemon=True).start()
-            else:
-                C.err("stream", "stream stopped repeatedly by server — stopping session to prevent rate limits.")
-                self.running = False
-
-        elif event_type == "VOICE_CONNECTION_STATUS":
-            status = d.get("state", "")
-            if status:
-                C.info(f"voice connection status: {status}")
-
-    def _cleanup(self, guild_id: str) -> None:
-        C = self.console
-        self.running = False
-        ws = self.ws
-
-        if ws and not ws.closed and self.stream_key:
-            try:
-                ws.send(json.dumps({
-                    "op": 19,
-                    "d": {"stream_key": self.stream_key},
-                }))
-            except Exception:
-                pass
-
-        if ws and not ws.closed and not self._user_left_vc:
-            try:
-                ws.send(json.dumps({
-                    "op": 4,
-                    "d": {
-                        "guild_id": guild_id,
-                        "channel_id": None,
-                        "self_mute": False,
-                        "self_deaf": False,
-                        "self_video": False,
-                    },
-                }))
-            except Exception:
-                pass
-
-        if self.stream_conn:
-            self.stream_conn.close()
-        if self.voice_conn:
-            self.voice_conn.close()
-        if ws:
-            time.sleep(0.3)
-            ws.close()
-
-        if (self.stream_connected or self.stream_ever_active) and self.start_time > 0:
-            elapsed = time.time() - self.start_time
-            hours = elapsed / 3600.0
-            if elapsed >= 10:
-                self.state.total_stream_hours_claimed += hours
-                self.state.total_stream_sessions += 1
-                self.state.save()
-                print()
-                C.ok("stream", f"ended · {elapsed:.0f}s ({hours:.2f}h) streamed live")
-                C.info(f"{C.GREY}note: badge progression typically syncs within 24-48 hours.{C.RESET}")
-        else:
-            print()
-            C.info("stream session ended.")
-
-        C.rule()
-        input(f"  {C.ORANGE}›{C.RESET} press enter to return to menu")
 
 
 
@@ -3664,6 +2192,12 @@ class ApplicationController:
         T.log(f"{T.COLOR_MUTED}note: discord badge progression updates every 24-48h on analytics sync.{T.COLOR_RESET}")
         return accepted
 
+    def _warn_game_time(self) -> None:
+        T = self.terminal
+        T.warning("game time", "Game Time progress will most likely not increase.")
+        T.warning("game time", "Discord has patched this server side, so scripts that claim to boost it no longer count.")
+        print()
+
     def trigger_playtime_ingestion(self, default_games: int | None = None, default_hours: float = 1.0, label: str = "Game Time") -> None:
         if not self._star_gate(quiet=True):
             self.terminal.failure("star", f"Star/follow check failed, {label} stopped.")
@@ -3673,6 +2207,8 @@ class ApplicationController:
             self._pause()
             return
         self.terminal.display_header()
+        if label == "Game Time":
+            self._warn_game_time()
         params = self._ask_claim_params(label, default_games, default_hours)
         if params == BACK_TO_MENU:
             return
@@ -3684,7 +2220,7 @@ class ApplicationController:
         T = self.terminal
         if fresh_screen:
             T.display_header()
-        done = self.state.total_stream_hours_claimed
+        done = self._streamer_totals()[0]
         options = []
         for tier, name, req in STREAM_TIERS:
             left = req - done
@@ -3714,7 +2250,7 @@ class ApplicationController:
             return
         self.terminal.display_header()
         mode = self._streamer_gate()
-        if mode in (None, "manual"):
+        if mode != "headless":
             return
         hours = self._pick_stream_hours(fresh_screen=True)
         if hours == BACK_TO_MENU:
@@ -3732,6 +2268,7 @@ class ApplicationController:
         T.display_header()
         T.log("Level up all: press enter to accept each default")
         print()
+        self._warn_game_time()
         time_params = self._ask_claim_params("Game Time", TIME_DEFAULT_GAMES, TIME_DEFAULT_HOURS)
         if time_params == BACK_TO_MENU:
             return
@@ -3749,7 +2286,7 @@ class ApplicationController:
         stream_mode = self._streamer_gate()
         if stream_mode is None:
             return
-        stream_hours = 0.0 if stream_mode == "manual" else self._pick_stream_hours(allow_zero=True)
+        stream_hours = 0.0 if stream_mode != "headless" else self._pick_stream_hours(allow_zero=True)
         if stream_hours == BACK_TO_MENU:
             return
         if stream_hours is None:
@@ -3907,198 +2444,97 @@ class ApplicationController:
         T.separator()
         input(f"  {T.COLOR_PRIMARY}›{T.COLOR_RESET} Press enter to continue")
 
-    def _choose_stream_target(self, auto: bool = False) -> tuple[str, str] | None:
-        C = self.stream_console
-        props = self.runtime_context.encoded_properties
-        st, me = _discord_api_get("https://discord.com/api/v9/users/@me", self.state.token, props)
-        if st == 401:
-            C.err("auth", f"your token was rejected (HTTP 401), update it with '{CREDENTIALS_MENU}'")
-            self._pause()
-            return None
-        if st == 200:
-            C.ok("account", f"signed in as {me.get('global_name') or me.get('username')} ({me.get('id')})")
-        if auto:
-            C.info("auto select: joining your voice channel")
-            if self._validate_target(AUTO_GUILD_ID, AUTO_CHANNEL_ID):
-                return AUTO_GUILD_ID, AUTO_CHANNEL_ID
-            C.warn("auto", "could not use that voice channel, pick another target")
-        C.info("scanning your servers for crowded voice channels (up to 15s)...")
-        dbg: dict = {}
-        all_guilds: list[dict] = []
-        try:
-            recs = scan_busy_servers(self.state.token, self.runtime_context.props_dict, self.runtime_context.encoded_properties, debug=dbg, all_out=all_guilds)
-        except Exception as exc:
-            recs = []
-            dbg["error"] = repr(exc)
-        if not recs:
-            C.warn("scan", "no live voice data from the gateway, falling back to the token API (servers by online members)")
-            recs = rest_active_servers(self.state.token, props)
-            if recs:
-                C.info(f"{C.GREY}live voice counts are not available this way, an alt must join the channel you pick{C.RESET}")
-        if not recs:
-            C.warn("scan", "nothing to recommend, enter a target manually")
-            ev = ", ".join(f"{k}x{v}" for k, v in (dbg.get("events") or {}).items()) or "none"
-            C.info(f"{C.GREY}scan debug: events [{ev}] · servers {dbg.get('guilds', 0)} · with channels {dbg.get('with_channels', 0)}"
-                   f" · with voice users {dbg.get('with_voice', 0)} · close {dbg.get('close')} · error {dbg.get('error') or 'none'}{C.RESET}")
-        print()
-        if recs:
-            C.info(f"{C.GREY}AFK channels are skipped · ✓ you can Go Live there · ✗ you cannot · ? could not be checked{C.RESET}")
-        while True:
-            options = [format_recommendation(r) for r in recs]
-            options += ["Browse all streamable servers", "Enter server and voice channel manually", "Back to Main menu"]
-            idx = arrow_menu("Where do you want to stream?", options)
-            if idx is None or idx == len(options) - 1:
-                return None
-            if idx < len(recs):
-                guild_id, channel_id = recs[idx]["id"], recs[idx]["vcs"][0][0]
-            elif idx == len(recs):
-                guild_id, channel_id = self._browse_stream_targets(all_guilds)
-                if not guild_id:
-                    continue
-            else:
-                guild_id, channel_id = self._ask_stream_target_manually()
-                if not guild_id:
-                    continue
-            if self._validate_target(guild_id, channel_id):
-                return guild_id, channel_id
-            print()
-
-    def _validate_target(self, guild_id: str, channel_id: str) -> bool:
-        """Checks the server, the voice channel and the Go Live permission, and remembers the target when valid."""
-        C = self.stream_console
-        print()
-        C.info("verifying server, voice channel, and streaming permissions...")
-        valid, _info = validate_stream_target(
-            token=self.state.token,
-            super_props=self.runtime_context.encoded_properties,
-            guild_id=guild_id,
-            channel_id=channel_id,
-            console=C,
-        )
-        if valid:
-            self.state.last_guild_id = guild_id
-            self.state.last_channel_id = channel_id
-            self.state.save()
-        return valid
-
-    def _browse_stream_targets(self, all_guilds: list[dict]) -> tuple[str, str]:
-        C = self.stream_console
-        token, props = self.state.token, self.runtime_context.encoded_properties
-        me_id = extract_account_snowflake(token)
-        servers: list[dict] = []
-        if any(g["all_vcs"] for g in all_guilds):
-            for g in all_guilds:
-                if any(v[3] is not False for v in g["all_vcs"]):
-                    servers.append({"id": g["id"], "name": g["name"], "members": g["members"], "vcs": g["all_vcs"], "raw": None,
-                                    "rank": (g["browse_rank"], g["voice_total"], g["members"])})
-        else:
-            C.info("reading your server list...")
-            st, data = _discord_api_get("https://discord.com/api/v9/users/@me/guilds?with_counts=true", token, props)
-            if st != 200 or not isinstance(data, list):
-                C.err("servers", f"could not list your servers (HTTP {st})")
-                return "", ""
-            for g in data:
-                servers.append({"id": str(g["id"]), "name": g.get("name", "Unknown server"), "members": int(g.get("approximate_member_count") or 0),
-                                "vcs": None, "raw": g,
-                                "rank": (0, int(g.get("approximate_presence_count") or 0), int(g.get("approximate_member_count") or 0))})
-        servers.sort(key=lambda sv: sv["rank"], reverse=True)
-        if not servers:
-            C.warn("servers", "no server where you can Go Live was found")
-            return "", ""
-        while True:
-            opts = []
-            for sv in servers:
-                members = f"{sv['members']:,} members" if sv["members"] else "members n/a"
-                if sv["vcs"] is None:
-                    opts.append(f"{sv['name']} • {members}")
-                else:
-                    k = sum(1 for v in sv["vcs"] if v[3] is not False)
-                    opts.append(f"{sv['name']} • {members} • {k} streamable VC{'s' if k != 1 else ''}")
-            idx = arrow_menu("Which server?", opts + ["Back"])
-            if idx is None or idx == len(servers):
-                return "", ""
-            sv = servers[idx]
-            if sv["vcs"] is None:
-                C.info(f"checking voice channels in {sv['name']}...")
-                sv["vcs"] = rest_guild_vcs(token, props, sv["raw"], me_id) or []
-            ok = [v for v in sv["vcs"] if v[3] is not False]
-            if not ok:
-                C.warn("channels", f"no voice channel in {sv['name']} where you can Go Live")
-                continue
-            vopts = [(f"{name} ({n} in VC)" if n else name) + f" {STREAM_MARK[flag]}" for _cid, name, n, flag in ok]
-            j = arrow_menu(f"Voice channel in {sv['name']}?", vopts + ["Back to servers"])
-            if j is None or j == len(ok):
-                continue
-            return sv["id"], ok[j][0]
-
-    def _ask_stream_target_manually(self) -> tuple[str, str]:
-        C = self.stream_console
-        props = self.runtime_context.encoded_properties
-        last_g, last_c = self.state.last_guild_id, self.state.last_channel_id
-        g_raw = input(f"  {C.GREY}server (id or exact name){f' [{last_g}]' if last_g else ''}:{C.RESET} ").strip() or last_g
-        c_raw = input(f"  {C.GREY}voice channel (id or exact name){f' [{last_c}]' if last_c else ''}:{C.RESET} ").strip() or last_c
-        if not g_raw or not c_raw:
-            C.err("input", "a server and a voice channel are required")
-            return "", ""
-        guild_id, err = resolve_server(self.state.token, props, g_raw)
-        if err:
-            C.err("server", err)
-            return "", ""
-        channel_id, err = resolve_voice_channel(self.state.token, props, guild_id, c_raw)
-        if err:
-            C.err("channel", err)
-            return "", ""
-        return guild_id, channel_id
-
     def _streamer_gate(self) -> str | None:
-        """Warns that the headless streamer may be patched. Returns 'auto' or 'recommend' for the headless
-        streamer, 'manual' once the Watcher was started for a manual stream, or None when the user backs out."""
-        T = self.terminal
-        T.warning("streamer", "The headless streamer may be patched by Discord and can stop working at any time.")
-        T.log("Safer route: Go Live manually in the Discord app on this account, then run the Watcher on an alt account.")
-        print()
-        while True:
-            idx = arrow_menu("Streaming", [
-                "Recommended Stream manually, then start the Watcher",
-                "Use anyways (headless streamer)",
-                "Back to Main menu",
-            ])
-            if idx == 0:
-                self.start_watcher()
-                return "manual"
-            if idx != 1:
-                return None
-            mode = arrow_menu("How should the server be chosen?", [
-                "Recommended Auto select",
-                "Recommend server (pick from the busiest servers)",
-                "Back",
-            ])
-            if mode in (0, 1):
-                if not self._watcher_preflight() and arrow_menu(
-                    "The Watcher cannot start, nothing will watch the stream",
-                    ["Continue without the Watcher (an alt must join the channel)", "Back"],
-                ) != 0:
-                    continue
-                return ("auto", "recommend")[mode]
+        """Returns 'headless' to run Streamer/Streamer.js directly."""
+        return "headless"
 
     def run_gateway_live_streamer(self, hours: float = 0.0, mode: str | None = None) -> None:
         mode = mode or self._streamer_gate()
-        if mode not in ("auto", "recommend"):
+        if mode != "headless":
             return
-        target = self._choose_stream_target(auto=mode == "auto")
-        if not target:
+        C = self.stream_console
+        proc = self._open_streamer()
+        if proc is None:
             return
-        guild_id, channel_id = target
+        if hours > 0:
+            C.info(f"When the streamer asks for the duration, enter {hours * 60:,.0f} minutes ({hours:,.1f}h).")
+        else:
+            C.info("When the streamer asks for the duration, enter 0 to stream until you stop it.")
+        C.info("The stream and its hour totals are handled in the streamer window.")
+        C.info("Once it is live, use 'Start Watcher' in the main menu so the alt watches it.")
 
-        engine = GatewayStreamEngine(self.state, self.runtime_context, self.stream_console)
-        opened: dict[str, Any] = {}
-        engine.on_live = lambda: opened.update(proc=self._open_watcher(guild_id, channel_id))
+    def _streamer_preflight(self) -> str | None:
+        """Streamer.js, Node.js and its npm packages. Installs missing packages. Prints why and returns
+        None when it cannot start, else the node executable."""
+        C = self.stream_console
+        if not STREAMER_SCRIPT.is_file():
+            C.warn("streamer", f"missing: {STREAMER_SCRIPT} (put Streamer.js in the Streamer folder next to BadgeMaxxer.py)")
+            return None
+        node = shutil.which("node")
+        if not node:
+            C.err("streamer", "Node.js was not found on PATH, install Node.js 18 or newer from https://nodejs.org and run BadgeMaxxer again")
+            return None
         try:
-            engine.start_stream(guild_id, channel_id, max_seconds=hours * 3600.0)
-        finally:
-            proc = opened.get("proc")
-            if proc is not None and proc.poll() is None:
-                proc.terminate()
+            out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=15).stdout.strip()
+            major = int(out.lstrip("v").split(".")[0])
+        except Exception:
+            major = 0
+        if 0 < major < 18:
+            C.err("streamer", f"Node.js {out} is too old, the streamer needs Node.js 18 or newer")
+            return None
+        missing = [p for p in STREAMER_PACKAGES if not (STREAMER_DIR / "node_modules" / p).is_dir()]
+        if missing:
+            npm = shutil.which("npm")
+            if not npm:
+                C.err("streamer", f"npm was not found, run in {STREAMER_DIR}: npm install {' '.join(missing)}")
+                return None
+            try:
+                result = run_with_loader(
+                    ", ".join(missing),
+                    [npm, "install", "--no-audit", "--no-fund", *missing],
+                    cwd=str(STREAMER_DIR), timeout=900,
+                )
+            except Exception as exc:
+                C.err("streamer", f"npm install failed: {exc}")
+                return None
+            if result.returncode != 0:
+                tail = (result.stdout or "").strip().splitlines()[-3:]
+                C.err("streamer", f"npm install failed, run in {STREAMER_DIR}: npm install {' '.join(missing)}")
+                for line in tail:
+                    C.info(line)
+                return None
+            C.ok("streamer", f"installed {', '.join(missing)}")
+        if not shutil.which("ffmpeg"):
+            C.warn("streamer", "ffmpeg was not found on PATH, the streamer needs it to make the video feed")
+        return node
+
+    def _open_streamer(self):
+        C = self.stream_console
+        node = self._streamer_preflight()
+        if not node:
+            return None
+        cmd = [node, str(STREAMER_SCRIPT)]
+        if os.name == "nt":
+            proc = subprocess.Popen(cmd, cwd=str(STREAMER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
+        else:
+            terminal = find_terminal_posix()
+            if not terminal:
+                C.warn("streamer", f"run it in another terminal: cd \"{STREAMER_DIR}\" && node Streamer.js")
+                return None
+            launcher = ["sh", "-c", 'cd "$0" && exec "$@"', str(STREAMER_DIR)]
+            window = subprocess.Popen(terminal + launcher + cmd, cwd=str(STREAMER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            proc = PosixWatcherProcess(window, cmd)
+        C.ok("streamer", "opened in a new window, it asks for the account token there once (saved to Streamer/streamertoken2.json), then the voice channel and the duration")
+        return proc
+
+    def _streamer_totals(self) -> tuple[float, int]:
+        """Stream hours and sessions as logged by Streamer.js in Streamer/streamer_stats.json."""
+        try:
+            data = json.loads(STREAMER_STATS.read_text(encoding="utf-8"))
+            return float(data.get("totalHours") or 0.0), int(data.get("sessions") or 0)
+        except Exception:
+            return self.state.total_stream_hours_claimed, self.state.total_stream_sessions
+
 
     def _watcher_preflight(self):
         """Files, account id, a terminal (POSIX) and packages the Watcher needs, installing what is missing.
@@ -4120,11 +2556,11 @@ class ApplicationController:
                 return None
         for package in WATCHER_PACKAGES:
             if importlib.util.find_spec(package) is None:
-                C.info(f"installing {package} for the watcher ...")
                 if not _install_package(package):
                     hint = "use install.sh to set it up in a virtual environment" if SYSTEM_PYTHON_POSIX else f"run: pip install {package}"
                     C.err("watcher", f"could not install {package}, {hint}")
                     return None
+                C.ok("watcher", f"installed {package}")
                 importlib.invalidate_caches()
         return target, terminal
 
@@ -4174,7 +2610,8 @@ class ApplicationController:
             T.display_header()
             T.log(f"Detectable Titles: {T.COLOR_PRIMARY}{len(self.catalog)}{T.COLOR_TEXT}")
             T.log(f"Cumulative Logged: {T.COLOR_PRIMARY}{self.state.total_games_claimed}{T.COLOR_TEXT} titles · {T.COLOR_PRIMARY}{self.state.total_hours_claimed:,.1f}h{T.COLOR_TEXT} playtime")
-            T.log(f"Total Stream Hours: {T.COLOR_PRIMARY}{self.state.total_stream_hours_claimed:,.1f}h{T.COLOR_TEXT} ({self.state.total_stream_sessions} sessions)")
+            stream_hours, stream_sessions = self._streamer_totals()
+            T.log(f"Total Stream Hours: {T.COLOR_PRIMARY}{stream_hours:,.1f}h{T.COLOR_TEXT} ({stream_sessions} sessions)")
             print()
 
             choice = arrow_menu("Select what badge to level", options)
