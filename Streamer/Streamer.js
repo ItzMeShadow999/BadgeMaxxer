@@ -897,7 +897,7 @@ async function main() {
       : ["-re", "-f", "lavfi", "-i", `testsrc2=size=${CONFIG.width}x${CONFIG.height}:rate=${CONFIG.fps}`,
         ...(CONFIG.withAudio ? ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000"] : []), ...out,
         ...(CONFIG.withAudio ? ["-af", "volume=0.001", "-c:a", "libopus"] : ["-an"]), "-f", "matroska", "pipe:1"];
-    const ff = spawn("nice", ["-n", "15", CONFIG.ffmpeg, ...args], { stdio: ["ignore", "pipe", "pipe"] });
+    const ff = spawn(CONFIG.ffmpeg, args, { stdio: ["ignore", "pipe", "pipe"] });
     controller.signal.addEventListener("abort", () => ff.kill("SIGKILL"), { once: true });
     let last = 0;
     ff.stderr.on("data", d => {
