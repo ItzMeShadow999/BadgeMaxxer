@@ -74,12 +74,14 @@ function Install-BadgeMaxxer {
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $Dir "Watcher") | Out-Null
     New-Item -ItemType Directory -Force -Path (Join-Path $Dir "lib") | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $Dir "Streamer") | Out-Null
 
     foreach ($file in $Files) {
         $target = Join-Path $Dir ($file -replace "/", "\")
         $temp = "$target.download"
         Write-Step "Fetching $file ...."
         try {
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $target) | Out-Null
             Invoke-WebRequest -UseBasicParsing -Uri "$Base/$file" -OutFile $temp
             $actual = (Get-FileHash -Algorithm SHA256 -Path $temp).Hash.ToLower()
             if (-not $expected.ContainsKey($file)) { throw "no checksum listed for $file in SHA256SUMS" }
