@@ -19,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -60,7 +61,9 @@ WATCHER_PACKAGES = ("websockets", "davey")
 STREAMER_DIR = WORKSPACE_DIR / "Streamer"
 STREAMER_SCRIPT = STREAMER_DIR / "Streamer.js"
 STREAMER_STATS = STREAMER_DIR / "streamer_stats.json"
-STREAMER_PACKAGES = ("@lng2004/discord.js-selfbot-v13", "@dank074/discord-video-stream")
+STREAMER_PINS = {"@lng2004/discord.js-selfbot-v13": "3.7.2", "@dank074/discord-video-stream": "7.0.0"}
+STREAMER_PACKAGES = tuple(STREAMER_PINS)
+STREAMER_NODE_MIN = (22, 18)
 DATABASE_STORAGE_PATH = WORKSPACE_DIR / "data" / "games.json"
 
 REST_IDENTITY_URL = "https://discord.com/api/v9/users/@me?with_analytics_token=true"
@@ -248,6 +251,21 @@ def extract_account_snowflake(auth_token: str) -> str:
         return base64.b64decode(prefix + padding).decode("utf-8")
     except Exception:
         return ""
+
+
+_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{20,}")
+_PASTE_NOISE = re.compile(r"\x1b\[20[01]~|[​-‍⁠﻿]")
+
+
+def clean_token(raw: str) -> tuple[str, str]:
+    val = _PASTE_NOISE.sub("", raw).strip().strip("\"'`").strip()
+    val = re.sub(r"(?i)^(authorization\s*:\s*|bearer\s+)", "", val).strip().strip("\"'`")
+    if "webpackChunk" in val or val.startswith("copy("):
+        return "", ("That is the console snippet, not the token. Run it in the Discord console first "
+                    "(a browser may ask you to type 'allow pasting'), then paste the token it copied.")
+    if not _TOKEN_SHAPE.fullmatch(val) or not extract_account_snowflake(val).isdigit():
+        return "", "That does not look like a Discord token (three parts separated by dots, no spaces)."
+    return val, ""
 
 
 def build_binary_signature(account_id: str, file_path: str = "", active_pid: int = 0) -> str:
@@ -649,7 +667,15 @@ def read_key() -> str:
     old = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        ch = os.read(fd, 1).decode("utf-8", "ignore")
+        raw = os.read(fd, 1)
+        if raw and raw[0] >= 0xC0:
+            need = 1 if raw[0] < 0xE0 else 2 if raw[0] < 0xF0 else 3
+            while need and select.select([fd], [], [], ESC_SEQ_TIMEOUT)[0]:
+                raw += os.read(fd, 1)
+                need -= 1
+        ch = raw.decode("utf-8", "ignore")
+        if raw and not ch:
+            return ""
         if ch == "\x1b":
             seq = ""
             while len(seq) < 2 and select.select([fd], [], [], ESC_SEQ_TIMEOUT)[0]:
@@ -739,6 +765,24 @@ def arrow_menu(title: str, options: Sequence[str], hint: str = "↑/↓ move · 
         sys.stdout.flush()
 
 
+def _cells(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def _fit_cells(text: str, width: int) -> str:
+    """Cut text to at most width terminal cells (CJK characters take two), padded with spaces."""
+    if _cells(text) > width:
+        out, used = [], 0
+        for ch in text:
+            w = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+            if used + w > width - 1:
+                break
+            out.append(ch)
+            used += w
+        text = "".join(out) + "…"
+    return text + " " * max(0, width - _cells(text))
+
+
 class LineLoader:
 
     def __init__(self) -> None:
@@ -784,8 +828,7 @@ class LineLoader:
         line_w = min(w, 100) - 5
         end = (tail[:-5] if tail.endswith(" done") else tail).rjust(10)
         name_w = max(8, line_w - len(prefix) - 5 - len(end))
-        nm = name if len(name) <= name_w else name[: name_w - 1] + "…"
-        label = f"{prefix}{nm.ljust(name_w)}.... {end}"
+        label = f"{prefix}{_fit_cells(name, name_w)}.... {end}"
         spin = SPIN_FRAMES[self.frame % len(SPIN_FRAMES)]
         self.frame += 1
 
@@ -794,7 +837,7 @@ class LineLoader:
             self.active = True
 
         show_bar = self.force_bar or self.pct > 0.0 or self.dl_mb > 0.0
-        rows = [f"  {GOLD}{spin}{ANSI_RESET} \x1b[37m{label.ljust(w - 5)}{ANSI_RESET}"]
+        rows = [f"  {GOLD}{spin}{ANSI_RESET} \x1b[37m{_fit_cells(label, w - 5)}{ANSI_RESET}"]
 
         if show_bar:
             pct_str = f"{int(self.pct * 100)}%"
@@ -1106,9 +1149,21 @@ _COOKIE_IN_PASTE = re.compile(
 )
 
 
+def read_pasted_line(prompt: str) -> str:
+    parts = [input(prompt)]
+    while parts[-1].rstrip().endswith(("\\", "^")):
+        try:
+            parts.append(input())
+        except EOFError:
+            break
+    return " ".join(p.rstrip().rstrip("\\^").strip() for p in parts)
+
+
 def extract_cookie_header(raw: str) -> str:
     raw = raw.strip()
     m = _COOKIE_IN_PASTE.search(raw)
+    if not m and raw.lower().startswith("curl "):
+        return ""
     val = (m.group(1) if m else raw).strip()
     if len(val) > 1 and val[0] == val[-1] and val[0] in "'\"":
         val = val[1:-1].strip()
@@ -1151,16 +1206,37 @@ class AccountSessionState:
         if STATE_STORAGE_PATH.exists():
             try:
                 raw_data = json.loads(STATE_STORAGE_PATH.read_text(encoding="utf-8"))
+                if not isinstance(raw_data, dict):
+                    raise ValueError("not a JSON object")
+            except ValueError as exc:
+                broken = STATE_STORAGE_PATH.with_name(f"{STATE_STORAGE_PATH.name}.broken-{int(time.time())}")
+                try:
+                    os.replace(STATE_STORAGE_PATH, broken)
+                    print(f"  session.json could not be read ({exc}), moved it to {broken.name} and started fresh.", file=sys.stderr)
+                except OSError:
+                    pass
+                return cls()
+            except OSError:
+                return cls()
+            try:
                 known_keys = set(cls().__dict__.keys())
                 instance = cls(**{k: v for k, v in raw_data.items() if k in known_keys and k != "used_games"})
                 instance.used_games = raw_data.get("used_games", [])
                 migrate = False
+                unreadable = set()
                 for key in SECRET_FIELDS:
                     stored = str(getattr(instance, key) or "")
                     migrate = migrate or bool(stored and not secret_store.is_protected(stored) and secret_store.available())
-                    setattr(instance, key, secret_store.reveal(key, stored))
+                    value = secret_store.reveal(key, stored)
+                    if not value and secret_store.is_protected(stored):
+                        unreadable.add(key)
+                    setattr(instance, key, value)
+                instance._unreadable = unreadable
                 if migrate:
-                    instance.persist()
+                    try:
+                        instance.persist()
+                    except OSError:
+                        pass
                 return instance
             except Exception:
                 pass
@@ -1175,17 +1251,34 @@ class AccountSessionState:
                 pass
         if not isinstance(existing, dict):
             existing = {}
+        # A secret that could not be read (locked keyring, no session) is still empty here.
+        # Keep its stored reference instead of overwriting it with nothing.
+        unreadable = {key for key in getattr(self, "_unreadable", set()) if not getattr(self, key)}
+        kept = {key: existing[key] for key in unreadable if existing.get(key)}
+        self._unreadable = unreadable
         existing.update(asdict(self))
         for key in SECRET_FIELDS:
             existing[key] = secret_store.protect(key, str(existing.get(key) or ""))
-        if os.name == "nt":
-            secret_store.restrict_file(STATE_STORAGE_PATH)
-            STATE_STORAGE_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-        else:
-            fd = os.open(STATE_STORAGE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        existing.update(kept)
+        # Write a temporary file and swap it in, so a crash or full disk never leaves a half-written session.json.
+        tmp = STATE_STORAGE_PATH.with_name(STATE_STORAGE_PATH.name + ".tmp")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                os.fchmod(fh.fileno(), 0o600)
+                if os.name != "nt":
+                    os.fchmod(fh.fileno(), 0o600)
                 fh.write(json.dumps(existing, indent=2))
+                fh.flush()
+                os.fsync(fh.fileno())
+            if os.name == "nt":
+                secret_store.restrict_file(tmp, force=True)
+            os.replace(tmp, STATE_STORAGE_PATH)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     def save(self) -> None:
         self.persist()
@@ -1226,6 +1319,8 @@ def assemble_super_properties(signature_id: str, session_id: str) -> tuple[str, 
         )
         with urllib.request.urlopen(network_req, timeout=10) as net_resp:
             properties_payload = json.loads(net_resp.read().decode("utf-8"))["properties"]
+        if not isinstance(properties_payload, dict):
+            raise ValueError("properties is not an object")
     except Exception:
         properties_payload = generate_fallback_properties()
 
@@ -1234,6 +1329,10 @@ def assemble_super_properties(signature_id: str, session_id: str) -> tuple[str, 
     properties_payload["client_heartbeat_session_id"] = session_id
     serialized = json.dumps(properties_payload, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(serialized).decode("ascii"), properties_payload
+
+
+class TokenRejected(RuntimeError):
+    pass
 
 
 def request_analytics_credential(auth_token: str, super_properties_b64: str) -> str:
@@ -1249,6 +1348,9 @@ def request_analytics_credential(auth_token: str, super_properties_b64: str) -> 
         with urllib.request.urlopen(network_req, timeout=15) as net_resp:
             parsed = json.loads(net_resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise TokenRejected("Discord rejected the account token (HTTP 401). It is incomplete or Discord reset it "
+                                "(logout, password change), a fresh token is needed.") from exc
         raise RuntimeError(f"Authentication rejected by endpoint (HTTP {exc.code})") from exc
 
     credential = parsed.get("analytics_token")
@@ -1642,13 +1744,29 @@ class TelemetryEventFabricator:
         }
 
         request_handle = urllib.request.Request(TELEMETRY_INGEST_URL, data=encoded_body, method="POST", headers=network_headers)
-        try:
-            with urllib.request.urlopen(request_handle, timeout=15) as response:
-                return response.status
-        except urllib.error.HTTPError as error:
-            return error.code
-        except Exception:
-            return 0
+        for attempt in range(3):
+            last = attempt == 2
+            try:
+                with urllib.request.urlopen(request_handle, timeout=15) as response:
+                    return response.status
+            except urllib.error.HTTPError as error:
+                if error.code == 429 and not last:
+                    try:
+                        wait = float(error.headers.get("Retry-After") or json.loads(error.read() or b"{}").get("retry_after") or 5)
+                    except (ValueError, AttributeError, TypeError):
+                        wait = 5.0
+                    time.sleep(min(max(wait, 1.0), 60.0))
+                    continue
+                if error.code >= 500 and not last:
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                return error.code
+            except Exception:
+                if not last:
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                return 0
+        return 0
 
 
 def segment_collection(items: Sequence[DetectableTitle], chunk_size: int) -> Iterator[Sequence[DetectableTitle]]:
@@ -1683,7 +1801,8 @@ class IngestionPipeline:
                 )
                 return processed_successfully
             else:
-                self.terminal.warning(f"batch {batch_index}", f"HTTP {http_status}")
+                reason = "network error" if http_status == 0 else f"HTTP {http_status}"
+                self.terminal.warning(f"batch {batch_index}", f"{reason}, batch skipped")
 
             time.sleep(NETWORK_COOLDOWN_SEC)
 
@@ -1987,7 +2106,7 @@ class ApplicationController:
         self.terminal.log("synchronizing analytics credentials...")
         self._renew_session()
         try:
-            synchronize_credentials(self.state, self.runtime_context.encoded_properties)
+            self._synchronize_or_ask_token()
         except Exception as exc:
             self.terminal.failure("auth", str(exc))
             self.terminal.warning("auth", f"Opening the menu anyway, use '{CREDENTIALS_MENU}' to fix your token or cookie.")
@@ -2020,11 +2139,22 @@ class ApplicationController:
             except Exception:
                 pass
             T.log("Open Discord (web or desktop), press Ctrl+Shift+I, open Console, paste, press Enter.")
+            T.log("A browser may refuse the paste until you type: allow pasting. On Linux the desktop app has no console, use the browser.")
             T.log("The snippet copies your token to the clipboard itself. Come back here and paste it below.")
         else:
             T.log("Paste your Discord account authorization token:")
-        val = input(f"  {T.COLOR_MUTED}token:{T.COLOR_RESET} ").strip().strip("\"'`")
+        val = ""
+        for _ in range(3):
+            raw = input(f"  {T.COLOR_MUTED}token:{T.COLOR_RESET} ")
+            if not raw.strip():
+                break
+            val, problem = clean_token(raw)
+            if val:
+                break
+            T.failure("token", problem)
         if val:
+            if val != self.state.token:
+                self.state.fetched_at = 0
             self.state.token = val
             self.state.persist()
             self.terminal.success("token", "Saved to local state")
@@ -2049,11 +2179,13 @@ class ApplicationController:
     def _prompt_clearance_cookie(self) -> None:
         print_cookie_help(self.terminal)
         self.terminal.log("Paste your cf_clearance cookie header value:")
-        val = extract_cookie_header(input(f"  {self.terminal.COLOR_MUTED}cookie:{self.terminal.COLOR_RESET} "))
+        val = extract_cookie_header(read_pasted_line(f"  {self.terminal.COLOR_MUTED}cookie:{self.terminal.COLOR_RESET} "))
         if val:
             self.state.cookie = val
             self.state.persist()
             self.terminal.success("cookie", "Saved to local state")
+        else:
+            self.terminal.failure("cookie", "No cookie found in the paste, nothing was saved.")
 
     def _reconfigure_credentials(self) -> None:
         T = self.terminal
@@ -2069,7 +2201,7 @@ class ApplicationController:
         T.log("Refreshing analytics token from Discord...")
         try:
             self.state.fetched_at = 0
-            synchronize_credentials(self.state, self.runtime_context.encoded_properties)
+            self._synchronize_or_ask_token()
         except Exception as exc:
             T.failure("auth", str(exc))
             self._pause()
@@ -2079,13 +2211,30 @@ class ApplicationController:
         T.success("auth", "Credentials refreshed successfully")
         time.sleep(1)
 
+    def _synchronize_or_ask_token(self) -> None:
+        """Refresh the analytics token; when Discord rejects the account token, offer to enter a new one."""
+        for attempt in range(3):
+            try:
+                synchronize_credentials(self.state, self.runtime_context.encoded_properties)
+                return
+            except TokenRejected as exc:
+                if attempt == 2:
+                    raise
+                self.terminal.failure("auth", str(exc))
+                if arrow_menu("Token rejected", ["Enter a new token now", "Skip"]) != 0:
+                    raise TokenRejected("The account token was not changed.") from exc
+                old = self.state.token
+                self._prompt_account_token()
+                if self.state.token == old:
+                    raise TokenRejected("The account token was not changed.") from exc
+
     def _ensure_runtime_readiness(self) -> bool:
         if not self.state.cookie:
             self.terminal.failure("cookie", f"Missing cookie. Use '{CREDENTIALS_MENU}' in the menu to configure.")
             return False
         if self.state.requires_refresh:
             try:
-                synchronize_credentials(self.state, self.runtime_context.encoded_properties)
+                self._synchronize_or_ask_token()
             except Exception as exc:
                 self.terminal.failure("auth", str(exc))
                 return False
@@ -2181,7 +2330,8 @@ class ApplicationController:
         )
 
         picked = {title.title_id for title in selected_titles}
-        self.state.used_games = [gid for gid in self.state.used_games if gid not in picked or gid in engine.accepted_ids]
+        accepted_ids = set(engine.accepted_ids)
+        self.state.used_games = [gid for gid in self.state.used_games if gid not in picked or gid in accepted_ids]
 
         print()
         T.success("completed", f"{accepted}/{len(selected_titles)} titles processed ({accepted * hours:,.1f}h total)")
@@ -2321,7 +2471,8 @@ class ApplicationController:
 
     def _filter_title_selection(self, desired_amount: int) -> list[DetectableTitle]:
         existing_pool = {item.title_id for item in self.catalog}
-        unprocessed = [item.title_id for item in self.catalog if item.title_id not in self.state.used_games]
+        used = set(self.state.used_games)
+        unprocessed = [item.title_id for item in self.catalog if item.title_id not in used]
         processed = [gid for gid in self.state.used_games if gid in existing_pool]
 
         if len(unprocessed) >= desired_amount:
@@ -2332,7 +2483,8 @@ class ApplicationController:
                 needed = desired_amount - len(chosen)
                 chosen.extend(processed[:needed])
 
-        self.state.used_games = [gid for gid in self.state.used_games if gid not in chosen] + chosen
+        chosen_set = set(chosen)
+        self.state.used_games = [gid for gid in self.state.used_games if gid not in chosen_set] + chosen
         registry = {item.title_id: item for item in self.catalog}
         return [registry[gid] for gid in chosen if gid in registry]
 
@@ -2416,6 +2568,7 @@ class ApplicationController:
                 "authorization": self.state.token,
                 "user-agent": USER_AGENT_IDENTIFIER,
                 "x-super-properties": encoded_props,
+                "x-discord-locale": CLIENT_LOCALE,
             },
         )
         try:
@@ -2454,14 +2607,14 @@ class ApplicationController:
             return
         C = self.stream_console
         proc = self._open_streamer()
-        if proc is None:
-            return
-        if hours > 0:
-            C.info(f"When the streamer asks for the duration, enter {hours * 60:,.0f} minutes ({hours:,.1f}h).")
-        else:
-            C.info("When the streamer asks for the duration, enter 0 to stream until you stop it.")
-        C.info("The stream and its hour totals are handled in the streamer window.")
-        C.info("Once it is live, use 'Start Watcher' in the main menu so the alt watches it.")
+        if proc is not None:
+            if hours > 0:
+                C.info(f"When the streamer asks for the duration, enter {hours * 60:.0f} minutes ({hours:,.1f}h).")
+            else:
+                C.info("When the streamer asks for the duration, enter 0 to stream until you stop it.")
+            C.info("The stream and its hour totals are handled in the streamer window.")
+            C.info("Once it is live, use 'Start Watcher' in the main menu so the alt watches it.")
+        self._pause()
 
     def _streamer_preflight(self) -> str | None:
         """Streamer.js, Node.js and its npm packages. Installs missing packages. Prints why and returns
@@ -2472,34 +2625,36 @@ class ApplicationController:
             return None
         node = shutil.which("node")
         if not node:
-            C.err("streamer", "Node.js was not found on PATH, install Node.js 18 or newer from https://nodejs.org and run BadgeMaxxer again")
+            C.err("streamer", f"Node.js was not found on PATH, install Node.js {STREAMER_NODE_MIN[0]}.{STREAMER_NODE_MIN[1]} or newer from https://nodejs.org and run BadgeMaxxer again")
             return None
+        out = ""
         try:
             out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=15).stdout.strip()
-            major = int(out.lstrip("v").split(".")[0])
+            version = tuple(int(part) for part in out.lstrip("v").split(".")[:2])
         except Exception:
-            major = 0
-        if 0 < major < 18:
-            C.err("streamer", f"Node.js {out} is too old, the streamer needs Node.js 18 or newer")
+            version = ()
+        if version and version < STREAMER_NODE_MIN:
+            C.err("streamer", f"Node.js {out} is too old, the streamer needs Node.js {STREAMER_NODE_MIN[0]}.{STREAMER_NODE_MIN[1]} or newer")
             return None
-        missing = [p for p in STREAMER_PACKAGES if not (STREAMER_DIR / "node_modules" / p).is_dir()]
+        missing = [p for p in STREAMER_PACKAGES if not (STREAMER_DIR / "node_modules" / p / "package.json").is_file()]
         if missing:
             npm = shutil.which("npm")
+            specs = [f"{p}@{STREAMER_PINS[p]}" for p in missing]
             if not npm:
-                C.err("streamer", f"npm was not found, run in {STREAMER_DIR}: npm install {' '.join(missing)}")
+                C.err("streamer", f"npm was not found, run in {STREAMER_DIR}: npm install {' '.join(specs)}")
                 return None
+            # --prefix keeps npm in the Streamer folder even when a parent folder has its own package.json
+            cmd = [npm, "install", "--prefix", str(STREAMER_DIR), "--no-audit", "--no-fund"]
+            if not (STREAMER_DIR / "package.json").is_file():
+                cmd += specs
             try:
-                result = run_with_loader(
-                    ", ".join(missing),
-                    [npm, "install", "--no-audit", "--no-fund", *missing],
-                    cwd=str(STREAMER_DIR), timeout=900,
-                )
+                result = run_with_loader(", ".join(missing), cmd, cwd=str(STREAMER_DIR), timeout=900)
             except Exception as exc:
                 C.err("streamer", f"npm install failed: {exc}")
                 return None
             if result.returncode != 0:
                 tail = (result.stdout or "").strip().splitlines()[-3:]
-                C.err("streamer", f"npm install failed, run in {STREAMER_DIR}: npm install {' '.join(missing)}")
+                C.err("streamer", f"npm install failed, run in {STREAMER_DIR}: npm install {' '.join(specs)}")
                 for line in tail:
                     C.info(line)
                 return None
@@ -2514,12 +2669,15 @@ class ApplicationController:
         if not node:
             return None
         cmd = [node, str(STREAMER_SCRIPT)]
+        account = extract_account_snowflake(self.state.token)
+        if account.isdigit():
+            cmd += ["--expect", account]
         if os.name == "nt":
             proc = subprocess.Popen(cmd, cwd=str(STREAMER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
         else:
             terminal = find_terminal_posix()
             if not terminal:
-                C.warn("streamer", f"run it in another terminal: cd \"{STREAMER_DIR}\" && node Streamer.js")
+                C.warn("streamer", f"run it in another terminal: cd \"{STREAMER_DIR}\" && node Streamer.js {' '.join(cmd[2:])}".rstrip())
                 return None
             launcher = ["sh", "-c", 'cd "$0" && exec "$@"', str(STREAMER_DIR)]
             window = subprocess.Popen(terminal + launcher + cmd, cwd=str(STREAMER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
