@@ -51,6 +51,7 @@ LOCATE_WAIT_SECONDS = 15
 STEP_TIMEOUT = 15
 TEARDOWN_PAUSE = 1.5
 STABLE_SECONDS = 60
+GATEWAY_OFFLINE_LIMIT = 20 * 60
 DEFAULT_MAX_ATTEMPTS = 8
 MAX_SESSION_SECONDS = 9.5 * 3600
 
@@ -182,7 +183,10 @@ DBG = DebugLog()
 
 
 def log(msg):
-    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    try:
+        print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+    except OSError:
+        pass
     DBG.write("log", msg)
 
 
@@ -246,7 +250,7 @@ def exit_pause():
                 thread.join()
         else:
             input("Press Enter to exit...")
-    except (EOFError, KeyboardInterrupt):
+    except (EOFError, KeyboardInterrupt, OSError):
         pass
 
 

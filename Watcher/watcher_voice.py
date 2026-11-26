@@ -174,13 +174,12 @@ class VoiceLink:
             await self.on_ready(data)
         elif op == 4:
             await self.on_session(data)
-        elif self.dave is not None:
-            if op == 21:
-                await self.dave_prepare_transition(data)
-            elif op == 22:
-                self.dave_execute(data.get("transition_id"))
-            elif op == 24:
-                await self.dave_prepare_epoch(data)
+        elif op == 21:
+            await self.dave_prepare_transition(data)
+        elif op == 22:
+            self.dave_execute(data.get("transition_id"))
+        elif op == 24:
+            await self.dave_prepare_epoch(data)
 
     def discover_blocking(self, ip, port):
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -269,7 +268,7 @@ class VoiceLink:
         if tid == 0:
             self.dave_execute(0)
         else:
-            if self.pending[tid] == 0:
+            if self.pending[tid] == 0 and self.dave is not None:
                 self.dave.set_passthrough_mode(True, 120)
             await self.send_json(23, {"transition_id": tid})
 
