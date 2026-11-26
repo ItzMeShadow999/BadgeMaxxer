@@ -54,10 +54,59 @@ resolve_tag() {
     sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' "$1" | head -n 1
 }
 
+ensure_system_packages() {
+    command -v apt-get >/dev/null 2>&1 || return 0
+    need=""
+    if ! command -v python3 >/dev/null 2>&1; then
+        need="$need python3 python3-venv"
+    elif ! python3 -c 'import venv, ensurepip' >/dev/null 2>&1; then
+        need="$need python3-venv"
+    fi
+    if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+        need="$need curl"
+    fi
+    if ! command -v node >/dev/null 2>&1; then
+        need="$need nodejs"
+    fi
+    if ! command -v npm >/dev/null 2>&1; then
+        need="$need npm"
+    fi
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        need="$need ffmpeg"
+    fi
+    if [ -n "$need" ]; then
+        if [ "$(id -u)" -eq 0 ]; then
+            sudo_cmd=""
+        elif command -v sudo >/dev/null 2>&1; then
+            sudo_cmd="sudo"
+        else
+            bad "Missing system packages:$need. Run as root: apt-get install$need"
+            return 0
+        fi
+        step "Installing system packages:$need ..."
+        if ! $sudo_cmd apt-get update -qq || ! $sudo_cmd apt-get install -y -qq $need; then
+            bad "apt could not install:$need. Install them yourself: sudo apt install$need"
+            return 0
+        fi
+        ok "System packages installed:$need"
+    fi
+    if command -v node >/dev/null 2>&1; then
+        node_major="$(node --version 2>/dev/null | sed 's/^v//; s/\..*//')"
+        case "$node_major" in
+            ""|*[!0-9]*) ;;
+            *) if [ "$node_major" -lt 18 ]; then
+                   bad "Node.js $(node --version) is too old, the Streamer needs Node.js 18 or newer (use NodeSource or nvm)"
+               fi ;;
+        esac
+    fi
+}
+
 install_badgemaxxer() {
     echo
     printf '  %sBadgeMaxxer installer%s\n' "$YELLOW" "$RESET"
     echo
+
+    ensure_system_packages
 
     sums="$(mktemp)"
     trap 'rm -f "$sums"' EXIT
