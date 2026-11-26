@@ -18,7 +18,7 @@ jobs:
 
       - name: Generate SHA256SUMS
         run: |
-          find BadgeMaxxer.py lib Watcher -type f | sort | xargs sha256sum > SHA256SUMS
+          find BadgeMaxxer.py lib Watcher Streamer -type f | sort | xargs sha256sum > SHA256SUMS
           cat SHA256SUMS
 
       - name: Attach to release
