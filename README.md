@@ -148,6 +148,27 @@ For stream time to count:
 
 This tool uses a user token and sends generated telemetry and streaming activity, which violates Discord's Terms of Service. Accounts using it can be banned. Use a throwaway account, at your own risk. This project is not affiliated with Discord.
 
+## Contributors
+
+<div align="center">
+<table>
+  <tr>
+    <td align="center" width="140">
+      <img src="https://cdn.discordapp.com/avatars/1065604516399026176/43d51cebe305c472263d01a60a37b9a6.webp?size=1536" width="100" height="100" alt="literally.shadow"><br>
+      <sub><b>literally.shadow</b></sub>
+    </td>
+    <td align="center" width="140">
+      <img src="https://cdn.discordapp.com/avatars/722068753617125466/8560f8b26a5f59636a9e3d465a865fa1.webp?size=1280" width="100" height="100" alt="rockykln"><br>
+      <sub><b>rockykln</b></sub>
+    </td>
+    <td align="center" width="140">
+      <img src="https://cdn.discordapp.com/avatars/1003968507517607976/fd40a69b246901bd7b68dc37a8612745.webp?size=1280" width="100" height="100" alt="wept"><br>
+      <sub><b>wept</b></sub>
+    </td>
+  </tr>
+</table>
+</div>
+
 <div align="center">
 
 <sub>Made by <a href="https://github.com/ItzMeShadow999">ItzMeShadow999</a></sub>
