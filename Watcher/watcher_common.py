@@ -10,7 +10,6 @@ Keep the three files in the same folder.
 
 import asyncio
 import base64
-import getpass
 import json
 import os
 import platform
@@ -316,7 +315,8 @@ def get_token(fresh=False):
         if token:
             print("Alt account token loaded from watcher_session.json.")
     if not token:
-        token = getpass.getpass("Alt account token (hidden, saved to watcher_session.json): ").strip()
+        print("The alt account token is saved to watcher_session.json.")
+        token = secret_store.masked_input("Alt account token: ").strip()
         save = True
     token = token.strip('"').strip("'")
     if not token:

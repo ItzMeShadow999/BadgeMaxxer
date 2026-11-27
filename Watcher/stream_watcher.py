@@ -22,7 +22,7 @@ Built to keep going:
 
 Token handling: read from the DISCORD_ALT_TOKEN environment variable (the old
 DISCORD_MAIN_TOKEN name still works), else from watcher_session.json (saved on
-first run), else typed at a hidden prompt and saved there. A token from the
+first run), else typed at a prompt that shows * and saved there. A token from the
 environment variable is never saved. The
 token is never written to the debug log, and is deliberately NOT read from
 BadgeMaxxer's session.json (that file holds the other account's token). A

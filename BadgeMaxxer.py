@@ -2147,7 +2147,7 @@ class ApplicationController:
             T.log("Paste your Discord account authorization token:")
         val = ""
         for _ in range(3):
-            raw = input(f"  {T.COLOR_MUTED}token:{T.COLOR_RESET} ")
+            raw = secret_store.masked_input(f"  {T.COLOR_MUTED}token:{T.COLOR_RESET} ")
             if not raw.strip():
                 break
             val, problem = clean_token(raw)
