@@ -78,6 +78,7 @@ DISCORD_CATALOG_URL = "https://cdn.discordapp.com/detectables/games.json"
 DISPATCH_BATCH_LIMIT = 50
 TIME_DEFAULT_GAMES = 3
 TIME_DEFAULT_HOURS = 10.0
+GAME_TIME_MENU = "Game Time (patched by Discord)"
 MAX_GAME_HOURS = 24.0
 VARIETY_DEFAULT_HOURS = 1.0
 STREAM_DEFAULT_HOURS = 1.0
@@ -349,7 +350,7 @@ def gold_text(text: str) -> str:
 
 class Banner:
 
-    SUBTITLE = "Discord badge leveling  ·  Game Time  ·  Game Variety  ·  Streaming"
+    SUBTITLE = "Discord badge leveling  ·  Game Time (patched)  ·  Game Variety  ·  Streaming"
     MIN_ROWS_FULL = 28
     MIN_ROWS_BODY = 10
 
@@ -2347,6 +2348,7 @@ class ApplicationController:
         T = self.terminal
         T.warning("game time", "Game Time progress will most likely not increase.")
         T.warning("game time", "Discord has patched this server side, so scripts that claim to boost it no longer count.")
+        T.warning("game time", "It still runs, in case Discord starts counting it again.")
         print()
 
     def trigger_playtime_ingestion(self, default_games: int | None = None, default_hours: float = 1.0, label: str = "Game Time") -> None:
@@ -2420,12 +2422,18 @@ class ApplicationController:
         T.log("Level up all: press enter to accept each default")
         print()
         self._warn_game_time()
-        time_params = self._ask_claim_params("Game Time", TIME_DEFAULT_GAMES, TIME_DEFAULT_HOURS)
-        if time_params == BACK_TO_MENU:
+        pick = arrow_menu("Game Time is patched, include it anyway?",
+                          ["Skip Game Time", "Include Game Time", "Back to Main menu"])
+        if pick is None or pick == 2:
             return
-        if not time_params:
-            self._pause()
-            return
+        time_params = None
+        if pick == 1:
+            time_params = self._ask_claim_params("Game Time", TIME_DEFAULT_GAMES, TIME_DEFAULT_HOURS)
+            if time_params == BACK_TO_MENU:
+                return
+            if not time_params:
+                self._pause()
+                return
         print()
         variety_params = self._ask_claim_params("Game Variety", None, VARIETY_DEFAULT_HOURS)
         if variety_params == BACK_TO_MENU:
@@ -2445,13 +2453,14 @@ class ApplicationController:
             return
 
         print()
-        T.separator()
-        T.log(f"{T.COLOR_PRIMARY}Game Time{T.COLOR_RESET}")
-        if not self._star_gate(quiet=True):
-            T.failure("star", "Star/follow check failed before Game Time, stopping.")
-            self._pause("exit")
-            return
-        self._run_claim(*time_params)
+        if time_params:
+            T.separator()
+            T.log(f"{T.COLOR_PRIMARY}Game Time{T.COLOR_RESET}")
+            if not self._star_gate(quiet=True):
+                T.failure("star", "Star/follow check failed before Game Time, stopping.")
+                self._pause("exit")
+                return
+            self._run_claim(*time_params)
         T.separator()
         T.log(f"{T.COLOR_PRIMARY}Game Variety{T.COLOR_RESET}")
         if not self._star_gate(quiet=True):
@@ -2797,7 +2806,7 @@ class ApplicationController:
         T = self.terminal
         options = [
             "Level up all",
-            "Game Time",
+            GAME_TIME_MENU,
             "Game Variety",
             "Streaming",
             "Start Watcher",
