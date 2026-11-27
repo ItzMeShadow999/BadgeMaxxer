@@ -650,6 +650,16 @@ def copy_to_clipboard_posix(text: str) -> bool:
     return False
 
 
+def copy_to_clipboard(text: str) -> bool:
+    if os.name == "nt":
+        try:
+            subprocess.run(["clip"], input=text.encode("utf-8"), check=True, timeout=5)
+            return True
+        except Exception:
+            return False
+    return copy_to_clipboard_posix(text)
+
+
 def read_key() -> str:
     if os.name == "nt":
         import msvcrt
@@ -1945,6 +1955,8 @@ def github_device_login(T: "TerminalInterface") -> str:
         return ""
     url = d.get("verification_uri", "https://github.com/login/device")
     T.log(f"Open {T.COLOR_PRIMARY}{url}{T.COLOR_TEXT} and enter the code {T.COLOR_PRIMARY}{d['user_code']}{T.COLOR_TEXT}")
+    if copy_to_clipboard(str(d["user_code"])):
+        T.log("The code is in your clipboard, paste it on the GitHub page.")
     if can_open_browser():
         try:
             webbrowser.open(url)
@@ -2130,16 +2142,7 @@ class ApplicationController:
         T.log(TOKEN_SNIPPET)
         print_cookie_help(T, TOKEN_HELP)
         if arrow_menu("Use snippet", ["Yes", "No (enter manually)"]) == 0:
-            try:
-                if os.name == "nt":
-                    subprocess.run(["clip"], input=TOKEN_SNIPPET.encode("ascii"), check=True)
-                    T.log("Copied to clipboard.")
-                elif copy_to_clipboard_posix(TOKEN_SNIPPET):
-                    T.log("Copied to clipboard.")
-                else:
-                    T.log("Copy the snippet above manually.")
-            except Exception:
-                pass
+            T.log("Copied to clipboard." if copy_to_clipboard(TOKEN_SNIPPET) else "Copy the snippet above manually.")
             T.log("Open Discord (web or desktop), press Ctrl+Shift+I, open Console, paste, press Enter.")
             T.log("A browser may refuse the paste until you type: allow pasting. On Linux the desktop app has no console, use the browser.")
             T.log("The snippet copies your token to the clipboard itself. Come back here and paste it below.")
@@ -2147,7 +2150,7 @@ class ApplicationController:
             T.log("Paste your Discord account authorization token:")
         val = ""
         for _ in range(3):
-            raw = input(f"  {T.COLOR_MUTED}token:{T.COLOR_RESET} ")
+            raw = secret_store.masked_input(f"  {T.COLOR_MUTED}token:{T.COLOR_RESET} ")
             if not raw.strip():
                 break
             val, problem = clean_token(raw)

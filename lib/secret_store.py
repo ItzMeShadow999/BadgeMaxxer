@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import codecs
 import hashlib
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -136,6 +138,68 @@ def reveal(name: str, stored: str) -> str:
 def discard(name: str) -> None:
     if _keyring_tool_present():
         _secret_tool(["clear", "service", SERVICE, "name", _item(name)])
+
+
+def masked_input(prompt: str) -> str:
+    """Like input(), but echoes one * per character so a token never shows on screen."""
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return input(prompt)
+    room = max(1, shutil.get_terminal_size((80, 24)).columns - len(re.sub(r"\x1b\[[0-9;]*m", "", prompt)) - 1)
+    chars: list[str] = []
+    sys.stdout.write(prompt)
+    sys.stdout.flush()
+
+    def feed(text: str) -> bool:
+        # stars stop at the line end, so backspace never has to cross a wrapped line
+        for ch in re.sub(r"\x1b(\[[0-9;?]*[ -/]*[@-~]|O.)?", "", text):
+            if ch in ("\r", "\n"):
+                return True
+            if ch == "\x03":
+                raise KeyboardInterrupt
+            if ch in ("\x08", "\x7f"):
+                if chars:
+                    if len(chars) <= room:
+                        sys.stdout.write("\b \b")
+                    chars.pop()
+            elif ch == "\x15":
+                sys.stdout.write("\b \b" * min(len(chars), room))
+                chars.clear()
+            elif ch.isprintable():
+                chars.append(ch)
+                if len(chars) <= room:
+                    sys.stdout.write("*")
+        sys.stdout.flush()
+        return False
+
+    try:
+        if os.name == "nt":
+            import msvcrt
+            while True:
+                ch = msvcrt.getwch()
+                if ch in ("\x00", "\xe0"):
+                    msvcrt.getwch()
+                elif feed(ch):
+                    break
+        else:
+            import termios
+            fd = sys.stdin.fileno()
+            old = termios.tcgetattr(fd)
+            mode = termios.tcgetattr(fd)
+            mode[3] &= ~(termios.ECHO | termios.ICANON)
+            mode[6][termios.VMIN], mode[6][termios.VTIME] = 1, 0
+            decoder = codecs.getincrementaldecoder("utf-8")("ignore")
+            termios.tcsetattr(fd, termios.TCSADRAIN, mode)
+            try:
+                while True:
+                    data = os.read(fd, 4096)
+                    if not data or feed(decoder.decode(data)):
+                        break
+            finally:
+                termios.tcsetattr(fd, termios.TCSADRAIN, old)
+    finally:
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+    return "".join(chars)
 
 
 def restrict_file(path: str | os.PathLike, force: bool = False) -> None:
