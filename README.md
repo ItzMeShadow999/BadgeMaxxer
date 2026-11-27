@@ -35,10 +35,10 @@
 
 ## Features
 
-- **Game Time**: few titles, long sessions. Defaults to 3 games for 10h each.
+- **Game Time** (patched by Discord): few titles, long sessions. Defaults to 3 games for 10h each. Discord stopped counting these sessions in November 2026, so progress will most likely not move. The option stays in case that changes.
 - **Game Variety**: the whole detectable catalog, short sessions. Defaults to all titles for 1h each.
 - **Streaming**: real Go Live with `Streamer/assets/video.mp4` or a generated test video, run by `Streamer/Streamer.js` (Node.js) in its own window. It streams for the minutes you enter there, or until you stop it.
-- **Level up all**: asks for all three up front, then runs them in order.
+- **Level up all**: asks for all three up front, then runs them in order. Game Time is skipped unless you include it.
 - **Inspect Profile**: lists the badges currently on your account.
 
 ## Requirements
@@ -104,8 +104,8 @@ On first run it asks for your account token and a `cf_clearance` cookie, then sa
 
 | Menu option | What it does |
 |---|---|
-| Level up all | Game Time, Game Variety and Streaming in one run |
-| Game Time | Long sessions on a few games |
+| Level up all | Game Variety and Streaming in one run, Game Time only if you include it |
+| Game Time (patched by Discord) | Long sessions on a few games, progress will most likely not move |
 | Game Variety | Short sessions across many games |
 | Streaming | Headless Go Live in a voice channel |
 | Start Watcher | Opens the Watcher on an alt account in a new window |
