@@ -113,6 +113,7 @@ TOKEN_HELP = (
 )
 BACK_TO_MENU = -1.0
 CREDENTIALS_MENU = "Refresh Credentials & Cookie"
+LEVEL_BADGE_IDS = (20, 21, 19, 18)  # Game Time, Game Variety, Streaming, Account Age
 ESC_SEQ_TIMEOUT = 0.5
 
 DESKTOP_CLIENT_VERSION = "1.0.9253"
@@ -2591,11 +2592,52 @@ class ApplicationController:
                     T.log(f"  {T.COLOR_PRIMARY}•{T.COLOR_RESET} {T.COLOR_TEXT}{bid}{T.COLOR_RESET}: {desc}")
             else:
                 T.log("No public badges equipped on profile.")
+            self._show_badge_progress(encoded_props)
         except Exception as exc:
             T.failure("profile", f"Failed to retrieve profile: {exc}")
 
         T.separator()
         input(f"  {T.COLOR_PRIMARY}›{T.COLOR_RESET} Press enter to continue")
+
+    def _show_badge_progress(self, encoded_props: str) -> None:
+        """Progress of the leveling badges, hidden ones included. Discord answers 404 without x-super-properties."""
+        T = self.terminal
+        request = urllib.request.Request(
+            f"{DISCORD_USERS_API}/@me/badges",
+            headers={
+                "authorization": self.state.token,
+                "user-agent": USER_AGENT_IDENTIFIER,
+                "x-super-properties": encoded_props,
+                "x-discord-locale": CLIENT_LOCALE,
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as resp:
+                badges = json.loads(resp.read().decode("utf-8")).get("badges") or []
+        except urllib.error.HTTPError as exc:
+            T.log(f"{T.COLOR_MUTED}Badge progress is not available (HTTP {exc.code}).{T.COLOR_RESET}")
+            return
+        except Exception as exc:
+            T.log(f"{T.COLOR_MUTED}Badge progress is not available ({exc}).{T.COLOR_RESET}")
+            return
+        by_id = {b.get("badge_id"): b for b in badges if isinstance(b, dict)}
+        rows = [by_id[i] for i in LEVEL_BADGE_IDS if i in by_id]
+        if not rows:
+            return
+        T.log("Badge progress:")
+        for badge in rows:
+            tiers = {t.get("key"): t for t in badge.get("tiers") or [] if isinstance(t, dict)}
+            current = (tiers.get(badge.get("current_tier")) or {}).get("name") or "none"
+            line = f"{badge.get('name')}: {badge.get('info_label') or '-'} · tier {current}"
+            upcoming = tiers.get(badge.get("next_tier"))
+            if upcoming:
+                need = (upcoming.get("requirements") or [{}])[0]
+                line += f" · next {upcoming.get('name')} at {need.get('threshold')} {need.get('unit', '')}".rstrip()
+            elif badge.get("current_tier"):
+                line += " · highest tier"
+            if badge.get("hidden"):
+                line += " · hidden on profile"
+            T.log(f"  {T.COLOR_PRIMARY}•{T.COLOR_RESET} {line}")
 
     def _streamer_gate(self) -> str | None:
         """Returns 'headless' to run Streamer/Streamer.js directly."""

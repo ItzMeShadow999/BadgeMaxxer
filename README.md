@@ -158,15 +158,15 @@ This tool uses a user token and sends generated telemetry and streaming activity
 <table>
   <tr>
     <td align="center" width="140">
-      <img src="https://cdn.discordapp.com/avatars/1065604516399026176/43d51cebe305c472263d01a60a37b9a6.webp?size=1536" width="100" height="100" alt="literally.shadow"><br>
+      <a href="https://discord.com/users/1065604516399026176"><img src="https://cdn.discordapp.com/avatars/1065604516399026176/43d51cebe305c472263d01a60a37b9a6.webp?size=1536" width="100" height="100" alt="literally.shadow"></a><br>
       <sub><b>literally.shadow</b></sub>
     </td>
     <td align="center" width="140">
-      <img src="https://cdn.discordapp.com/avatars/722068753617125466/8560f8b26a5f59636a9e3d465a865fa1.webp?size=1280" width="100" height="100" alt="rockykln"><br>
+      <a href="https://discord.com/users/722068753617125466"><img src="https://cdn.discordapp.com/avatars/722068753617125466/8560f8b26a5f59636a9e3d465a865fa1.webp?size=1280" width="100" height="100" alt="rockykln"></a><br>
       <sub><b>rockykln</b></sub>
     </td>
     <td align="center" width="140">
-      <img src="https://cdn.discordapp.com/avatars/1003968507517607976/fd40a69b246901bd7b68dc37a8612745.webp?size=1280" width="100" height="100" alt="wept"><br>
+      <a href="https://discord.com/users/1003968507517607976"><img src="https://cdn.discordapp.com/avatars/1003968507517607976/fd40a69b246901bd7b68dc37a8612745.webp?size=1280" width="100" height="100" alt="wept"></a><br>
       <sub><b>wept</b></sub>
     </td>
   </tr>
