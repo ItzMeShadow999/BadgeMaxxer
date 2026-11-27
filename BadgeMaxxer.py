@@ -64,6 +64,10 @@ STREAMER_STATS = STREAMER_DIR / "streamer_stats.json"
 STREAMER_PINS = {"@lng2004/discord.js-selfbot-v13": "3.7.2", "@dank074/discord-video-stream": "7.0.0"}
 STREAMER_PACKAGES = tuple(STREAMER_PINS)
 STREAMER_NODE_MIN = (22, 18)
+HYPESQUAD_DIR = WORKSPACE_DIR / "HypeSquad"
+HYPESQUAD_SCRIPT = HYPESQUAD_DIR / "HypeSquad_Picker.py"
+HYPESQUAD_MENU = "HypeSquad Picker"
+HYPESQUAD_STOPS = ((144, 121, 222), (225, 113, 95), (63, 203, 179))  
 DATABASE_STORAGE_PATH = WORKSPACE_DIR / "data" / "games.json"
 
 REST_IDENTITY_URL = "https://discord.com/api/v9/users/@me?with_analytics_token=true"
@@ -346,6 +350,18 @@ def gold_text(text: str) -> str:
         out.append(ch)
     out.append(ANSI_RESET)
     return "".join(out)
+
+
+def hypesquad_text(text: str) -> str:
+    """Bold three color gradient for the highlighted HypeSquad menu entry."""
+    span = max(1, len(text) - 1)
+    out: list[str] = []
+    for c, ch in enumerate(text):
+        s = c / span * (len(HYPESQUAD_STOPS) - 1)
+        i = min(int(s), len(HYPESQUAD_STOPS) - 2)
+        r, g, b = (int(x + (y - x) * (s - i)) for x, y in zip(HYPESQUAD_STOPS[i], HYPESQUAD_STOPS[i + 1]))
+        out.append(f"\x1b[1;38;2;{r};{g};{b}m{ch}")
+    return "".join(out) + ANSI_RESET
 
 
 class Banner:
@@ -734,7 +750,9 @@ def arrow_menu(title: str, options: Sequence[str], hint: str = "↑/↓ move · 
                     more = " \x1b[90m▲"
                 elif i == off + view - 1 and off + view < n:
                     more = " \x1b[90m▼"
-            if i == sel:
+            if i == sel and raw == HYPESQUAD_MENU:
+                buf.append(f"\r\x1b[2K   {hypesquad_text('› ' + opt)}{more}{ANSI_RESET}\n")
+            elif i == sel:
                 buf.append(f"\r\x1b[2K   {GOLD_BOLD}› {opt}{more}{ANSI_RESET}\n")
             else:
                 buf.append(f"\r\x1b[2K     {base}{opt}{more}{ANSI_RESET}\n")
@@ -2802,6 +2820,21 @@ class ApplicationController:
         self._open_watcher()
         self._pause()
 
+    def open_hypesquad_picker(self) -> None:
+        """Runs HypeSquad/HypeSquad_Picker.py in this window and returns to the menu when it exits."""
+        T = self.terminal
+        if not HYPESQUAD_SCRIPT.is_file():
+            T.failure("hypesquad", f"missing: {HYPESQUAD_SCRIPT}")
+            self._pause()
+            return
+        try:
+            code = subprocess.run([sys.executable, str(HYPESQUAD_SCRIPT)], cwd=str(HYPESQUAD_DIR)).returncode
+        except KeyboardInterrupt:
+            return
+        if code != 0:
+            T.failure("hypesquad", f"picker exited with code {code}")
+            self._pause()
+
     def render_main_menu(self) -> None:
         T = self.terminal
         options = [
@@ -2810,6 +2843,7 @@ class ApplicationController:
             "Game Variety",
             "Streaming",
             "Start Watcher",
+            HYPESQUAD_MENU,
             "Inspect Discord Profile & Badges",
             CREDENTIALS_MENU,
             "Configure Executable Fingerprint",
@@ -2825,7 +2859,7 @@ class ApplicationController:
 
             choice = arrow_menu("Select what badge to level", options)
             print()
-            if choice is None or choice == 8:
+            if choice is None or choice == 9:
                 break
             if choice == 0:
                 self.level_up_all()
@@ -2838,10 +2872,12 @@ class ApplicationController:
             elif choice == 4:
                 self.start_watcher()
             elif choice == 5:
-                self.inspect_profile()
+                self.open_hypesquad_picker()
             elif choice == 6:
-                self._reconfigure_credentials()
+                self.inspect_profile()
             elif choice == 7:
+                self._reconfigure_credentials()
+            elif choice == 8:
                 self.configure_executable_fingerprint()
 
 
