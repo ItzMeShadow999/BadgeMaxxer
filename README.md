@@ -45,7 +45,7 @@
 
 - Python 3.9 or newer
 - Windows or Linux (the fingerprint option is Windows only)
-- On Linux: `curl` or `wget`, and Python with `venv` (on Debian and Ubuntu: `python3-venv`). `wl-copy`, `xclip` or `xsel` are optional, for copying the token snippet. `secret-tool` is recommended so tokens go to the desktop keyring instead of a plaintext file (Debian and Ubuntu: `libsecret-tools`, Arch and Fedora: `libsecret`).
+- On Linux: `curl` or `wget`, and Python with `venv` (on Debian and Ubuntu: `python3-venv`). `wl-copy`, `xclip` or `xsel` are optional, for copying the token snippet and the GitHub login code. `secret-tool` is recommended so tokens go to the desktop keyring instead of a plaintext file (Debian and Ubuntu: `libsecret-tools`, Arch and Fedora: `libsecret`).
 - `websockets` and `davey` for the Watcher (voice and stream connection with DAVE encryption). The installers and BadgeMaxxer install them for you if missing.
 - For Streaming: Node.js 22.18 or newer with `npm`, and `ffmpeg` on PATH. BadgeMaxxer installs the two npm packages from `Streamer/package.json` into `Streamer/` on first use.
 
