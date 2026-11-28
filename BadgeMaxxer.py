@@ -9,6 +9,7 @@ import importlib.util
 import json
 import math
 import os
+import platform
 import re
 import select
 import shlex
@@ -34,6 +35,11 @@ try:
     import secret_store
 except ImportError:
     sys.exit("lib/secret_store.py is missing next to BadgeMaxxer.py. Re-run the installer to get all files.")
+
+try:
+    import auto_install
+except ImportError:
+    auto_install = None
 
 SECRET_FIELDS = ("token", "cookie", "analytics_token", "github_token", "fingerprint")
 
@@ -86,10 +92,6 @@ GAME_TIME_MENU = "Game Time (patched by Discord)"
 MAX_GAME_HOURS = 24.0
 VARIETY_DEFAULT_HOURS = 1.0
 STREAM_DEFAULT_HOURS = 1.0
-AUTO_GUILD_ID = "1573044682051551262"
-AUTO_CHANNEL_ID = "1573245332492656702"
-STREAM_ROTATE_SEC = 4 * 3600
-STREAM_REJOIN_GAP_SEC = 3.0
 NETWORK_COOLDOWN_SEC = 0.3
 TOKEN_EXPIRY_THRESHOLD_SEC = 12 * 3600
 TOKEN_SNIPPET = (
@@ -118,7 +120,7 @@ TOKEN_HELP = (
 )
 BACK_TO_MENU = -1.0
 CREDENTIALS_MENU = "Refresh Credentials & Cookie"
-LEVEL_BADGE_IDS = (20, 21, 19, 18)  # Game Time, Game Variety, Streaming, Account Age
+LEVEL_BADGE_IDS = (20, 21, 19, 18)
 ESC_SEQ_TIMEOUT = 0.5
 
 DESKTOP_CLIENT_VERSION = "1.0.9253"
@@ -353,7 +355,6 @@ def gold_text(text: str) -> str:
 
 
 def hypesquad_text(text: str) -> str:
-    """Bold three color gradient for the highlighted HypeSquad menu entry."""
     span = max(1, len(text) - 1)
     out: list[str] = []
     for c, ch in enumerate(text):
@@ -790,7 +791,6 @@ def _cells(text: str) -> int:
 
 
 def _fit_cells(text: str, width: int) -> str:
-    """Cut text to at most width terminal cells (CJK characters take two), padded with spaces."""
     if _cells(text) > width:
         out, used = [], 0
         for ch in text:
@@ -817,6 +817,8 @@ class LineLoader:
         self.sub: str = ""
         self.cur: str = ""
         self.force_bar: bool = False
+        self.indeterminate: bool = False
+        self.show_size: bool = True
         self._rows: int = 1
 
     @staticmethod
@@ -824,7 +826,12 @@ class LineLoader:
         return max(40, shutil.get_terminal_size((80, 24)).columns)
 
     def _bar(self, fill: int, width: int) -> str:
-        """Return a coloured block bar of the given character width."""
+        if self.indeterminate:
+            seg = max(4, width // 6)
+            span = width - seg
+            pos = self.frame % (2 * span) if span > 0 else 0
+            pos = pos if pos <= span else 2 * span - pos
+            return f"\x1b[90m{'░' * pos}{GOLD}{'█' * seg}\x1b[90m{'░' * (width - seg - pos)}{ANSI_RESET}"
         done = round(fill * width)
         done = max(0, min(done, width))
         filled = "█" * done
@@ -860,24 +867,27 @@ class LineLoader:
         rows = [f"  {GOLD}{spin}{ANSI_RESET} \x1b[37m{_fit_cells(label, w - 5)}{ANSI_RESET}"]
 
         if show_bar:
-            pct_str = f"{int(self.pct * 100)}%"
+            pct_str = "" if self.indeterminate else f"{int(self.pct * 100)}%"
             if self.total_mb > 0:
                 size_str = f"{self._size_str(self.dl_mb)} / {self._size_str(self.total_mb)}"
             else:
                 size_str = self._size_str(self.dl_mb)
-            right_part = f"  {pct_str.rjust(4)}  {size_str}"
+            right_part = f"  {pct_str.rjust(4)}" + (f"  {size_str}" if self.show_size else "")
             bar_avail = max(10, w - 4 - len(right_part) - 2)
             if self.sub:
                 sub = self.sub if len(self.sub) <= w - 8 else self.sub[: w - 9] + "…"
                 rows.append(f"    \x1b[90m↳ {ANSI_RESET}\x1b[37m{sub}{ANSI_RESET}")
             rows.append(f"    {self._bar(self.pct, bar_avail)}{ANSI_RESET}\x1b[90m{right_part}{ANSI_RESET}")
+        elif self.sub:
+            sub = self.sub if len(self.sub) <= w - 8 else self.sub[: w - 9] + "…"
+            rows.append(f"    \x1b[90m↳ {sub}{ANSI_RESET}")
 
         if self._rows > 1:
             sys.stdout.write(f"\x1b[{self._rows - 1}A")
         sys.stdout.write("\r")
         if len(rows) != self._rows:
             sys.stdout.write("\x1b[J")
-        sys.stdout.write("\n".join("\x1b[2K" + r for r in rows))
+        sys.stdout.write("\r\n".join("\x1b[2K" + r for r in rows))
         self._rows = len(rows)
         self._two_line = self._rows > 1
         sys.stdout.flush()
@@ -898,13 +908,24 @@ class LineLoader:
 
 
 import re as _re
-_NPM_HTTP_RE  = _re.compile(r"npm http fetch GET 200 .+?(\d+)ms \((\d+) bytes\)", _re.IGNORECASE)
-_NPM_STAGE_RE = _re.compile(r"npm timing (reify|resolve|fetch|link|audit)(?:Node)?:(\S+)", _re.IGNORECASE)
-_NPM_FETCH_RE = _re.compile(r"http fetch GET \d+ (\S+)", _re.IGNORECASE)
+_NPM_FETCH_RE = _re.compile(r"http (?:fetch GET \d+ |cache (?:\S+@)?)(https?://\S+)", _re.IGNORECASE)
+_NPM_RUN_RE = _re.compile(r"\binfo run (\S+@\S+) (\w+) (?!\{)")
 _NPM_TGZ_VER_RE = _re.compile(r"-(\d[\w.+-]*)\.tgz$")
 
 
-def _parse_npm_progress(line: str, loader: "LineLoader", fetched_bytes: list) -> None:
+class NpmProgress:
+    def __init__(self) -> None:
+        self.looked: set[str] = set()
+        self.got: set[str] = set()
+        self.cur = ""
+        self.script = ""
+
+
+def _parse_npm_progress(line: str, loader: "LineLoader", prog: "NpmProgress") -> None:
+    run = _NPM_RUN_RE.search(line)
+    if run:
+        prog.script = f"{run.group(1)} {run.group(2)}"
+        return
     m = _NPM_FETCH_RE.search(line)
     if not m:
         return
@@ -912,9 +933,43 @@ def _parse_npm_progress(line: str, loader: "LineLoader", fetched_bytes: list) ->
     if "/-/" in path:
         name, rest = path.split("/-/", 1)
         v = _NPM_TGZ_VER_RE.search(rest)
-        loader.cur = f"{name}@{v.group(1)}" if v else name
+        prog.got.add(path)
+        prog.cur = f"{name}@{v.group(1)}" if v else name
     elif path:
-        loader.cur = f"resolving {path}"
+        prog.looked.add(path)
+        prog.cur = path
+
+
+def _npm_expected_from_lock(cwd: str | None) -> int:
+    try:
+        lock = json.loads(Path(cwd or os.getcwd(), "package-lock.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    mach = platform.machine().lower()
+    cpu = {"amd64": "x64", "x86_64": "x64", "aarch64": "arm64", "arm64": "arm64", "i386": "ia32", "i686": "ia32", "x86": "ia32"}.get(
+        mach, "arm" if mach.startswith("arm") else mach)
+    libc = None
+    if sys.platform.startswith("linux"):
+        libc = "musl" if "musl" in (platform.libc_ver()[0] or "").lower() or Path("/etc/alpine-release").exists() else "glibc"
+
+    def fits(values: object, current: str | None) -> bool:
+        if not values or current is None:
+            return True
+        values = [str(v) for v in values] if isinstance(values, list) else [str(values)]
+        if "!" + current in values:
+            return False
+        wanted = [v for v in values if not v.startswith("!")]
+        return not wanted or current in wanted
+
+    count = 0
+    for key, entry in (lock.get("packages") or {}).items():
+        if not key or not isinstance(entry, dict) or entry.get("dev") or entry.get("link"):
+            continue
+        if Path(cwd or os.getcwd(), key, "package.json").is_file():
+            continue
+        if fits(entry.get("os"), sys.platform) and fits(entry.get("cpu"), cpu) and fits(entry.get("libc"), libc):
+            count += 1
+    return count
 
 
 def _scan_modules(root: str) -> tuple[int, float]:
@@ -934,65 +989,33 @@ def _scan_modules(root: str) -> tuple[int, float]:
     return count, size / 1_048_576
 
 
-def _npm_expected_packages(label: str, cmd: list[str], cwd: str | None, loader: "LineLoader") -> int:
-    box: dict = {}
-
-    def _dry() -> None:
-        try:
-            r = subprocess.run(
-                cmd + ["--dry-run", "--json"], cwd=cwd, capture_output=True,
-                text=True, encoding="utf-8", errors="replace", timeout=120,
-            )
-            box["out"] = r.stdout or ""
-        except Exception:
-            box["out"] = ""
-
-    th = threading.Thread(target=_dry, daemon=True)
-    th.start()
-    loader.force_bar = True
-    loader.sub = "resolving dependency tree"
-    while th.is_alive():
-        loader.update(label, "resolving", prefix="Installing ")
-        time.sleep(0.08)
-    out = box.get("out", "")
-    try:
-        data = json.loads(out[out.index("{"):])
-        added = data.get("added", 0)
-        return len(added) if isinstance(added, list) else int(added)
-    except Exception:
-        return 0
-
-
-def run_with_loader(label: str, cmd: list[str], *, cwd: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess:
-    """Run a subprocess while showing a spinner + live progress bar.
-
-    For npm install commands the bar shows N% and MB/MB downloaded in real time.
-    For other commands it falls back to a plain spinner.
-    """
+def run_with_loader(label: str, cmd: list[str], *, cwd: str | None = None, timeout: float | None = None,
+                    prefix: str = "Installing ", parser: Any = None, watch_file: str | None = None) -> subprocess.CompletedProcess:
     loader = LineLoader()
-    is_npm = any("npm" in str(c) for c in cmd)
-    fetched_bytes: list[int] = [0]
-    expected = 0
-    if is_npm and "install" in [str(c) for c in cmd] and "--dry-run" not in cmd:
-        try:
-            expected = _npm_expected_packages(label, [str(c) for c in cmd], cwd, loader)
-        finally:
-            loader.clear()
+    is_npm = bool(cmd) and os.path.basename(str(cmd[0])).lower().split(".")[0] == "npm"
+    prog = NpmProgress()
+    expected = _npm_expected_from_lock(cwd) if is_npm else 0
     if is_npm:
         loader.force_bar = True
+        loader.indeterminate = True
+        loader.sub = "resolving dependencies"
+    elif parser or watch_file:
+        loader.force_bar = True
+        loader.indeterminate = True
+        loader.show_size = False
 
     if is_npm:
         verbose_cmd = [str(c) for c in cmd]
         if "--loglevel" not in " ".join(verbose_cmd):
             verbose_cmd = [verbose_cmd[0]] + ["--loglevel=verbose"] + verbose_cmd[1:]
         proc = subprocess.Popen(
-            verbose_cmd, cwd=cwd,
+            verbose_cmd, cwd=cwd, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             encoding="utf-8", errors="replace",
         )
     else:
         proc = subprocess.Popen(
-            cmd, cwd=cwd,
+            cmd, cwd=cwd, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             encoding="utf-8", errors="replace",
         )
@@ -1002,11 +1025,25 @@ def run_with_loader(label: str, cmd: list[str], *, cwd: str | None = None, timeo
     stdout_lines: list[str] = []
     done_evt = threading.Event()
 
+    def _feed(raw: str) -> None:
+        text = _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", raw).strip()
+        if not text or "stable CLI interface" in text:
+            return
+        if parser:
+            try:
+                parser(text, loader)
+            except Exception:
+                pass
+        else:
+            loader.sub = text
+
     def _drain(stream, store: list, parse: bool) -> None:
         for raw in stream:
             store.append(raw)
             if parse:
-                _parse_npm_progress(raw, loader, fetched_bytes)
+                _parse_npm_progress(raw, loader, prog)
+            elif not is_npm:
+                _feed(raw)
         done_evt.set()
 
     if is_npm:
@@ -1022,34 +1059,65 @@ def run_with_loader(label: str, cmd: list[str], *, cwd: str | None = None, timeo
 
     def _monitor() -> None:
         nm = os.path.join(cwd or os.getcwd(), "node_modules")
-        base_pk, base_mb = _scan_modules(nm)
+        _, base_mb = _scan_modules(nm)
         while not stop_mon.is_set():
-            pk, mb = _scan_modules(nm)
-            done = max(0, pk - base_pk)
-            dl = max(0.0, mb - base_mb)
-            if expected > 0:
-                frac = min(done / expected, 0.99)
-                total = max(dl, dl / frac) if frac >= 0.1 else max(dl, 40.0)
-                loader.pct = frac
-                loader.total_mb = total
-                count = f"{min(done, expected)}/{expected} packages"
-            else:
-                total = max(dl + 5.0, 40.0)
-                loader.pct = min(dl / total, 0.95)
-                loader.total_mb = total
-                count = f"{done} packages"
-            loader.dl_mb = dl
-            loader.sub = f"{loader.cur}  ({count})" if loader.cur else count
+            _, mb = _scan_modules(nm)
+            loader.dl_mb = max(0.0, mb - base_mb)
+            loader.total_mb = 0.0
+            got, looked = len(prog.got), len(prog.looked)
+            total = expected or (max(looked, got) if got else 0)
+            if got and total:
+                loader.indeterminate = False
+                loader.pct = max(loader.pct, min(got / total, 0.99))
+                step = f"running {prog.script}" if prog.script else prog.cur
+                loader.sub = f"{step}  ({min(got, total)}/{total} packages)"
+            elif prog.script:
+                loader.indeterminate = True
+                loader.sub = f"running {prog.script}"
+            elif got:
+                loader.indeterminate = True
+                loader.sub = f"{prog.cur}  ({got} packages)"
+            elif looked:
+                loader.indeterminate = True
+                loader.sub = f"resolving dependencies  ({looked} looked up)"
             stop_mon.wait(0.35)
 
     if is_npm:
         threading.Thread(target=_monitor, daemon=True).start()
 
+    def _tail(path: str) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8-sig")("replace")
+        pos, buf = 0, ""
+        while True:
+            last = stop_mon.is_set()
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(pos)
+                    chunk = fh.read()
+                pos += len(chunk)
+            except OSError:
+                chunk = b""
+            if chunk:
+                parts = re.split(r"[\r\n]+", buf + decoder.decode(chunk))
+                buf = parts.pop()
+                for part in parts:
+                    _feed(part)
+            if last:
+                if buf:
+                    _feed(buf)
+                return
+            stop_mon.wait(0.15)
+
+    tail_thread = None
+    if watch_file:
+        tail_thread = threading.Thread(target=_tail, args=(watch_file,), daemon=True)
+        tail_thread.start()
+
     start = time.time()
     timed_out = False
     try:
         while True:
-            loader.update(label, "installing", prefix="Installing ")
+            loader.update(label, prefix.strip().lower(), prefix=prefix)
             try:
                 proc.wait(timeout=0.08)
                 break
@@ -1060,11 +1128,23 @@ def run_with_loader(label: str, cmd: list[str], *, cwd: str | None = None, timeo
                     timed_out = True
                     break
         stop_mon.set()
+        if tail_thread:
+            tail_thread.join(timeout=3)
         if is_npm and not timed_out:
+            loader.indeterminate = False
             loader.sub = "done"
             loader.pct = 1.0
-            loader.dl_mb = loader.total_mb if loader.total_mb > 0 else loader.dl_mb
-        loader.update(label, "timed out" if timed_out else "done", force=True, prefix="Installing ")
+        elif (parser or watch_file) and not timed_out and proc.returncode == 0:
+            loader.indeterminate = False
+            loader.pct = 1.0
+        loader.update(label, "timed out" if timed_out else "done", force=True, prefix=prefix)
+    except KeyboardInterrupt:
+        stop_mon.set()
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise
     finally:
         loader.clear()
 
@@ -1271,8 +1351,6 @@ class AccountSessionState:
                 pass
         if not isinstance(existing, dict):
             existing = {}
-        # A secret that could not be read (locked keyring, no session) is still empty here.
-        # Keep its stored reference instead of overwriting it with nothing.
         unreadable = {key for key in getattr(self, "_unreadable", set()) if not getattr(self, key)}
         kept = {key: existing[key] for key in unreadable if existing.get(key)}
         self._unreadable = unreadable
@@ -1280,7 +1358,6 @@ class AccountSessionState:
         for key in SECRET_FIELDS:
             existing[key] = secret_store.protect(key, str(existing.get(key) or ""))
         existing.update(kept)
-        # Write a temporary file and swap it in, so a crash or full disk never leaves a half-written session.json.
         tmp = STATE_STORAGE_PATH.with_name(STATE_STORAGE_PATH.name + ".tmp")
         try:
             fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -1299,9 +1376,6 @@ class AccountSessionState:
             except OSError:
                 pass
             raise
-
-    def save(self) -> None:
-        self.persist()
 
     @property
     def requires_refresh(self) -> bool:
@@ -1829,9 +1903,6 @@ class IngestionPipeline:
         return processed_successfully
 
 
-USER_AGENT = USER_AGENT_IDENTIFIER
-_user_id_from_token = extract_account_snowflake
-
 STREAM_TIERS = [
     (1, "Newcomer", 1),
     (2, "Fledgling", 5),
@@ -1844,7 +1915,6 @@ STREAM_TIERS = [
     (9, "Visionary", 2000),
     (10, "Phenomenon", 5000),
 ]
-
 
 
 class Console:
@@ -1899,9 +1969,6 @@ class Console:
 
     def rule(self) -> None:
         print(f"  {self.GREY}{self.RULE}{self.RESET}")
-
-
-
 
 
 STAR_REPO = "ItzMeShadow999/BadgeMaxxer"
@@ -2232,7 +2299,6 @@ class ApplicationController:
         time.sleep(1)
 
     def _synchronize_or_ask_token(self) -> None:
-        """Refresh the analytics token; when Discord rejects the account token, offer to enter a new one."""
         for attempt in range(3):
             try:
                 synchronize_credentials(self.state, self.runtime_context.encoded_properties)
@@ -2627,7 +2693,6 @@ class ApplicationController:
         input(f"  {T.COLOR_PRIMARY}›{T.COLOR_RESET} Press enter to continue")
 
     def _show_badge_progress(self, encoded_props: str) -> None:
-        """Progress of the leveling badges, hidden ones included. Discord answers 404 without x-super-properties."""
         T = self.terminal
         request = urllib.request.Request(
             f"{DISCORD_USERS_API}/@me/badges",
@@ -2667,7 +2732,6 @@ class ApplicationController:
             T.log(f"  {T.COLOR_PRIMARY}•{T.COLOR_RESET} {line}")
 
     def _streamer_gate(self) -> str | None:
-        """Returns 'headless' to run Streamer/Streamer.js directly."""
         return "headless"
 
     def run_gateway_live_streamer(self, hours: float = 0.0, mode: str | None = None) -> None:
@@ -2685,13 +2749,38 @@ class ApplicationController:
             C.info("Once it is live, use 'Start Watcher' in the main menu so the alt watches it.")
         self._pause()
 
+    def _ensure_system_deps(self) -> None:
+        C = self.stream_console
+        if auto_install is None:
+            C.warn("streamer", "lib/auto_install.py is missing, re-run the installer to get all files.")
+            return
+        auto_install.refresh_path()
+        need = auto_install.missing(STREAMER_NODE_MIN)
+        if not need:
+            return
+        C.warn("streamer", f"missing on this system: {', '.join(need)}. Installing them needs administrator/root rights.")
+        if arrow_menu("Install now?", ["Yes, install automatically", "No, I will install them myself"]) != 0:
+            return
+        def log(level: str, msg: str) -> None:
+            if level == "info":
+                C.info(msg)
+            else:
+                {"ok": C.ok, "warn": C.warn, "err": C.err}[level]("install", msg)
+        auto_install.install(need, log, runner=run_with_loader)
+        left = auto_install.missing(STREAMER_NODE_MIN)
+        if left:
+            C.err("install", f"still missing: {', '.join(left)}. You may need to restart this terminal, or install manually:")
+            for line in auto_install.manual_help(left):
+                C.info(line)
+        else:
+            C.ok("install", f"installed {', '.join(need)}")
+
     def _streamer_preflight(self) -> str | None:
-        """Streamer.js, Node.js and its npm packages. Installs missing packages. Prints why and returns
-        None when it cannot start, else the node executable."""
         C = self.stream_console
         if not STREAMER_SCRIPT.is_file():
             C.warn("streamer", f"missing: {STREAMER_SCRIPT} (put Streamer.js in the Streamer folder next to BadgeMaxxer.py)")
             return None
+        self._ensure_system_deps()
         node = shutil.which("node")
         if not node:
             C.err("streamer", f"Node.js was not found on PATH, install Node.js {STREAMER_NODE_MIN[0]}.{STREAMER_NODE_MIN[1]} or newer from https://nodejs.org and run BadgeMaxxer again")
@@ -2712,7 +2801,15 @@ class ApplicationController:
             if not npm:
                 C.err("streamer", f"npm was not found, run in {STREAMER_DIR}: npm install {' '.join(specs)}")
                 return None
-            # --prefix keeps npm in the Streamer folder even when a parent folder has its own package.json
+            if not (STREAMER_DIR / "package-lock.json").is_file():
+                lock_cmd = [npm, "install", "--package-lock-only", "--ignore-scripts", "--prefix", str(STREAMER_DIR),
+                            "--no-audit", "--no-fund"]
+                if not (STREAMER_DIR / "package.json").is_file():
+                    lock_cmd += specs
+                try:
+                    run_with_loader("dependency list", lock_cmd, cwd=str(STREAMER_DIR), timeout=300, prefix="Resolving ")
+                except Exception:
+                    pass
             cmd = [npm, "install", "--prefix", str(STREAMER_DIR), "--no-audit", "--no-fund"]
             if not (STREAMER_DIR / "package.json").is_file():
                 cmd += specs
@@ -2729,7 +2826,8 @@ class ApplicationController:
                 return None
             C.ok("streamer", f"installed {', '.join(missing)}")
         if not shutil.which("ffmpeg"):
-            C.warn("streamer", "ffmpeg was not found on PATH, the streamer needs it to make the video feed")
+            C.err("streamer", "ffmpeg was not found on PATH, the streamer needs it to make the video feed. Install it from https://ffmpeg.org/download.html and run BadgeMaxxer again")
+            return None
         return node
 
     def _open_streamer(self):
@@ -2755,17 +2853,13 @@ class ApplicationController:
         return proc
 
     def _streamer_totals(self) -> tuple[float, int]:
-        """Stream hours and sessions as logged by Streamer.js in Streamer/streamer_stats.json."""
         try:
             data = json.loads(STREAMER_STATS.read_text(encoding="utf-8"))
             return float(data.get("totalHours") or 0.0), int(data.get("sessions") or 0)
         except Exception:
             return self.state.total_stream_hours_claimed, self.state.total_stream_sessions
 
-
     def _watcher_preflight(self):
-        """Files, account id, a terminal (POSIX) and packages the Watcher needs, installing what is missing.
-        Prints why and returns None when it cannot start, else (account id, terminal command)."""
         C = self.stream_console
         absent = [name for name in WATCHER_FILES if not (WATCHER_DIR / name).is_file()]
         if absent:
@@ -2821,7 +2915,6 @@ class ApplicationController:
         self._pause()
 
     def open_hypesquad_picker(self) -> None:
-        """Runs HypeSquad/HypeSquad_Picker.py in this window and returns to the menu when it exits."""
         T = self.terminal
         if not HYPESQUAD_SCRIPT.is_file():
             T.failure("hypesquad", f"missing: {HYPESQUAD_SCRIPT}")
