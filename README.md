@@ -182,5 +182,3 @@ This tool uses a user token and sends generated telemetry and streaming activity
 <sub><sub><sub><sub><sub><b>Credits</b></sub></sub></sub></sub></sub>
 <br>
 <sub><sub><sub><sub><sub>BadgeMaxxer is built on the discord-badge-spoofer by revere-group</sub></sub></sub></sub></sub>
-
-o
