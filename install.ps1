@@ -3,8 +3,8 @@ $Repo   = "badgemaxxer"
 $Tag    = $env:BADGEMAXXER_TAG
 $Releases = "https://github.com/$Owner/$Repo/releases"
 $Dir    = Join-Path $env:USERPROFILE "BadgeMaxxer"
-$Files  = @("BadgeMaxxer.py", "lib/secret_store.py", "Watcher/stream_watcher.py", "Watcher/watcher_voice.py", "Watcher/watcher_common.py", "Streamer/Streamer.js")
-$Packages = @("websockets", "davey", "cryptography")
+$Files  = @("BadgeMaxxer.py", "lib/secret_store.py", "Watcher/stream_watcher.py", "Watcher/watcher_voice.py", "Watcher/watcher_common.py", "Streamer/Streamer.js", "Streamer/package.json")
+$Packages = @("websockets", "davey")
 
 function Write-Step($text) { Write-Host "  $text" -ForegroundColor Yellow }
 function Write-Ok($text)   { Write-Host "  $text" -ForegroundColor Green }
@@ -87,12 +87,15 @@ function Install-BadgeMaxxer {
             if (-not $expected.ContainsKey($file)) { throw "no checksum listed for $file in SHA256SUMS" }
             if ($actual -ne $expected[$file]) { throw "checksum mismatch (expected $($expected[$file]), got $actual)" }
             Write-Ok "Verified $file (sha256 $($actual.Substring(0, 16))...)"
-            Move-Item -Force -Path $temp -Destination $target
         } catch {
-            Remove-Item -Force -ErrorAction SilentlyContinue $temp
+            foreach ($f in $Files) { Remove-Item -Force -ErrorAction SilentlyContinue ((Join-Path $Dir ($f -replace "/", "\")) + ".download") }
             Write-Bad "Could not install $file : $($_.Exception.Message)"
             return
         }
+    }
+    foreach ($file in $Files) {
+        $target = Join-Path $Dir ($file -replace "/", "\")
+        Move-Item -Force -Path "$target.download" -Destination $target
     }
     Write-Ok "Files saved to $Dir (your session.json is never touched)"
 

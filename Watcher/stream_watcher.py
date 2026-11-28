@@ -29,19 +29,24 @@ BadgeMaxxer's session.json (that file holds the other account's token). A
 rejected token (4004) is deleted automatically; --reset-token forgets it.
 watcher_session.json and watcher_debug.log are git-ignored, never commit them.
 
-Requires: pip install -r requirements.txt   (websockets, davey)
+Requires the packages websockets and davey, which the BadgeMaxxer installers
+install. BadgeMaxxer starts the watcher from its Start Watcher menu entry.
 
-Usage:
-  python stream_watcher.py
-  python stream_watcher.py 1065604516399026176
-  python stream_watcher.py 1065604516399026176 --guild 123 --channel 456
-Stop with Ctrl+C (leaves the stream and the voice channel cleanly).
+Usage, from the BadgeMaxxer folder with the Python that runs BadgeMaxxer
+(Linux: the installer's .venv/bin/python, Windows: py -3):
+  .venv/bin/python Watcher/stream_watcher.py
+  .venv/bin/python Watcher/stream_watcher.py 1065604516399026176
+  .venv/bin/python Watcher/stream_watcher.py 1065604516399026176 --guild 123 --channel 456
+Stop with Ctrl+C (leaves the stream and the voice channel cleanly). On Linux,
+closing the terminal window or a SIGTERM does the same.
 """
 
 import argparse
 import asyncio
 import json
+import os
 import random
+import signal
 import time
 import traceback
 
@@ -52,6 +57,7 @@ from watcher_common import (
     DEFAULT_MAX_ATTEMPTS,
     FATAL_GATEWAY_CODES,
     GATEWAY_CLOSE_CODES,
+    GATEWAY_OFFLINE_LIMIT,
     GATEWAY_URL,
     LOCATE_WAIT_SECONDS,
     LOGGED_EVENTS,
@@ -194,6 +200,7 @@ class StreamWatcher:
 
     async def run(self):
         failures = 0
+        offline_since = None
         loop = asyncio.get_running_loop()
         self.properties, source = await loop.run_in_executor(None, load_client_properties)
         log(f"Client properties: {source}, build {self.properties.get('client_build_number')}.")
@@ -202,14 +209,21 @@ class StreamWatcher:
                 try:
                     outcome = await self.connect_once()
                     failures = 0
+                    offline_since = None
                 except (OSError, websockets.WebSocketException, asyncio.TimeoutError) as exc:
                     failures += 1
+                    if offline_since is None:
+                        offline_since = time.monotonic()
                     outcome = "network error"
                     log(f"Gateway connection error: {exc!r}")
+                    if failures >= 2 and self.resume_url:
+                        log("Resume address not reachable, using the main gateway address.")
+                        self.resume_url = None
                 if self.fatal:
                     break
-                if failures >= 8:
-                    log("Could not reach Discord after 8 tries. Check your internet connection.")
+                if offline_since is not None and time.monotonic() - offline_since >= GATEWAY_OFFLINE_LIMIT:
+                    log(f"Could not reach Discord for {GATEWAY_OFFLINE_LIMIT // 60} minutes. "
+                        "Check your internet connection.")
                     break
                 delay = min(2 ** failures, 30) if failures else 1
                 log(f"Reconnecting to the gateway in {delay}s ({outcome}).")
@@ -489,10 +503,17 @@ class StreamWatcher:
                 DBG.write("trace", traceback.format_exc())
                 outcome = ("failed", f"unexpected error {exc!r}", None, None)
             held = time.time() - started
-            if outcome[0] == "ended":
+            delete_reason = self.stream_delete_reason
+            was_live = self.target_live
+            if outcome[0] == "ended" and not was_live:
                 self.live_event.clear()
             await self.teardown()
 
+            # Live before and after teardown (the voice state of a real stream end can
+            # arrive just after STREAM_DELETE): Discord dropped only this viewer, retry.
+            if outcome[0] == "ended" and was_live and self.target_live:
+                outcome = ("failed", f"stream deleted with reason {delete_reason} "
+                                     "while the target is still live", None, None)
             if outcome[0] in ("ended", "cycle"):
                 attempts = 0
                 if outcome[0] == "ended":
@@ -647,7 +668,8 @@ def parse_args():
     return ap.parse_args()
 
 
-async def main(args):
+def prepare(args):
+    """Prompts and the help server join, run before the event loop so one Ctrl+C stops them."""
     print("Stream watcher (alt account)")
     DBG.open(args.log)
     target_id = args.user_id
@@ -659,15 +681,38 @@ async def main(args):
     if args.reset_token:
         forget_token()
     token = get_token()
-    for _ in range(3):
-        if token_user_id(token) != target_id:
-            break
+    retries = 0
+    while token_user_id(token) == target_id:
         print("That token belongs to the account being watched. The watcher needs the token of a different (alt) account.")
         forget_token()
+        if retries == 3:
+            raise SystemExit("Still the same account as the one being watched, stopping.")
+        retries += 1
         token = get_token(fresh=True)
-    else:
-        raise SystemExit("Still the same account as the one being watched, stopping.")
     join_support_server(token)
+    return token, target_id, preset
+
+
+def stop_on_signals(task):
+    """On POSIX, SIGTERM and SIGHUP (terminal closed) cancel the main task once, so the
+    Ctrl+C cleanup runs and the alt leaves the stream and the voice channel."""
+    if os.name == "nt":
+        return
+    loop = asyncio.get_running_loop()
+    stopping = False
+
+    def stop():
+        nonlocal stopping
+        if not stopping:
+            stopping = True
+            task.cancel()
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        loop.add_signal_handler(sig, stop)
+
+
+async def main(args, token, target_id, preset):
+    stop_on_signals(asyncio.current_task())
     watcher = StreamWatcher(token, target_id, max_attempts=max(1, args.max_attempts), preset=preset)
     log("Connecting to the gateway.")
     await watcher.run()
@@ -677,8 +722,10 @@ async def main(args):
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main(parse_args()))
-    except KeyboardInterrupt:
+        args = parse_args()
+        token, target_id, preset = prepare(args)
+        asyncio.run(main(args, token, target_id, preset))
+    except (KeyboardInterrupt, asyncio.CancelledError):
         log("Stopped.")
     except EOFError:
         log("No interactive terminal (stdin closed). Run the watcher from a terminal window.")

@@ -9,6 +9,7 @@ import importlib.util
 import json
 import math
 import os
+import platform
 import re
 import select
 import shlex
@@ -19,6 +20,7 @@ import sys
 import tempfile
 import threading
 import time
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,6 +35,11 @@ try:
     import secret_store
 except ImportError:
     sys.exit("lib/secret_store.py is missing next to BadgeMaxxer.py. Re-run the installer to get all files.")
+
+try:
+    import auto_install
+except ImportError:
+    auto_install = None
 
 SECRET_FIELDS = ("token", "cookie", "analytics_token", "github_token", "fingerprint")
 
@@ -60,7 +67,13 @@ WATCHER_PACKAGES = ("websockets", "davey")
 STREAMER_DIR = WORKSPACE_DIR / "Streamer"
 STREAMER_SCRIPT = STREAMER_DIR / "Streamer.js"
 STREAMER_STATS = STREAMER_DIR / "streamer_stats.json"
-STREAMER_PACKAGES = ("@lng2004/discord.js-selfbot-v13", "@dank074/discord-video-stream")
+STREAMER_PINS = {"@lng2004/discord.js-selfbot-v13": "3.7.2", "@dank074/discord-video-stream": "7.0.0"}
+STREAMER_PACKAGES = tuple(STREAMER_PINS)
+STREAMER_NODE_MIN = (22, 18)
+HYPESQUAD_DIR = WORKSPACE_DIR / "HypeSquad"
+HYPESQUAD_SCRIPT = HYPESQUAD_DIR / "HypeSquad_Picker.py"
+HYPESQUAD_MENU = "HypeSquad Picker"
+HYPESQUAD_STOPS = ((144, 121, 222), (225, 113, 95), (63, 203, 179))  
 DATABASE_STORAGE_PATH = WORKSPACE_DIR / "data" / "games.json"
 
 REST_IDENTITY_URL = "https://discord.com/api/v9/users/@me?with_analytics_token=true"
@@ -75,13 +88,10 @@ DISCORD_CATALOG_URL = "https://cdn.discordapp.com/detectables/games.json"
 DISPATCH_BATCH_LIMIT = 50
 TIME_DEFAULT_GAMES = 3
 TIME_DEFAULT_HOURS = 10.0
+GAME_TIME_MENU = "Game Time (patched by Discord)"
 MAX_GAME_HOURS = 24.0
 VARIETY_DEFAULT_HOURS = 1.0
 STREAM_DEFAULT_HOURS = 1.0
-AUTO_GUILD_ID = "1573044682051551262"
-AUTO_CHANNEL_ID = "1573245332492656702"
-STREAM_ROTATE_SEC = 4 * 3600
-STREAM_REJOIN_GAP_SEC = 3.0
 NETWORK_COOLDOWN_SEC = 0.3
 TOKEN_EXPIRY_THRESHOLD_SEC = 12 * 3600
 TOKEN_SNIPPET = (
@@ -110,6 +120,7 @@ TOKEN_HELP = (
 )
 BACK_TO_MENU = -1.0
 CREDENTIALS_MENU = "Refresh Credentials & Cookie"
+LEVEL_BADGE_IDS = (20, 21, 19, 18)
 ESC_SEQ_TIMEOUT = 0.5
 
 DESKTOP_CLIENT_VERSION = "1.0.9253"
@@ -250,6 +261,21 @@ def extract_account_snowflake(auth_token: str) -> str:
         return ""
 
 
+_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]{20,}")
+_PASTE_NOISE = re.compile(r"\x1b\[20[01]~|[​-‍⁠﻿]")
+
+
+def clean_token(raw: str) -> tuple[str, str]:
+    val = _PASTE_NOISE.sub("", raw).strip().strip("\"'`").strip()
+    val = re.sub(r"(?i)^(authorization\s*:\s*|bearer\s+)", "", val).strip().strip("\"'`")
+    if "webpackChunk" in val or val.startswith("copy("):
+        return "", ("That is the console snippet, not the token. Run it in the Discord console first "
+                    "(a browser may ask you to type 'allow pasting'), then paste the token it copied.")
+    if not _TOKEN_SHAPE.fullmatch(val) or not extract_account_snowflake(val).isdigit():
+        return "", "That does not look like a Discord token (three parts separated by dots, no spaces)."
+    return val, ""
+
+
 def build_binary_signature(account_id: str, file_path: str = "", active_pid: int = 0) -> str:
     if os.name != "nt":
         raise RuntimeError("Fingerprint generation requires a Windows runtime.")
@@ -328,9 +354,20 @@ def gold_text(text: str) -> str:
     return "".join(out)
 
 
+def hypesquad_text(text: str) -> str:
+    span = max(1, len(text) - 1)
+    out: list[str] = []
+    for c, ch in enumerate(text):
+        s = c / span * (len(HYPESQUAD_STOPS) - 1)
+        i = min(int(s), len(HYPESQUAD_STOPS) - 2)
+        r, g, b = (int(x + (y - x) * (s - i)) for x, y in zip(HYPESQUAD_STOPS[i], HYPESQUAD_STOPS[i + 1]))
+        out.append(f"\x1b[1;38;2;{r};{g};{b}m{ch}")
+    return "".join(out) + ANSI_RESET
+
+
 class Banner:
 
-    SUBTITLE = "Discord badge leveling  ·  Game Time  ·  Game Variety  ·  Streaming"
+    SUBTITLE = "Discord badge leveling  ·  Game Time (patched)  ·  Game Variety  ·  Streaming"
     MIN_ROWS_FULL = 28
     MIN_ROWS_BODY = 10
 
@@ -649,7 +686,15 @@ def read_key() -> str:
     old = termios.tcgetattr(fd)
     try:
         tty.setraw(fd)
-        ch = os.read(fd, 1).decode("utf-8", "ignore")
+        raw = os.read(fd, 1)
+        if raw and raw[0] >= 0xC0:
+            need = 1 if raw[0] < 0xE0 else 2 if raw[0] < 0xF0 else 3
+            while need and select.select([fd], [], [], ESC_SEQ_TIMEOUT)[0]:
+                raw += os.read(fd, 1)
+                need -= 1
+        ch = raw.decode("utf-8", "ignore")
+        if raw and not ch:
+            return ""
         if ch == "\x1b":
             seq = ""
             while len(seq) < 2 and select.select([fd], [], [], ESC_SEQ_TIMEOUT)[0]:
@@ -706,7 +751,9 @@ def arrow_menu(title: str, options: Sequence[str], hint: str = "↑/↓ move · 
                     more = " \x1b[90m▲"
                 elif i == off + view - 1 and off + view < n:
                     more = " \x1b[90m▼"
-            if i == sel:
+            if i == sel and raw == HYPESQUAD_MENU:
+                buf.append(f"\r\x1b[2K   {hypesquad_text('› ' + opt)}{more}{ANSI_RESET}\n")
+            elif i == sel:
                 buf.append(f"\r\x1b[2K   {GOLD_BOLD}› {opt}{more}{ANSI_RESET}\n")
             else:
                 buf.append(f"\r\x1b[2K     {base}{opt}{more}{ANSI_RESET}\n")
@@ -739,6 +786,23 @@ def arrow_menu(title: str, options: Sequence[str], hint: str = "↑/↓ move · 
         sys.stdout.flush()
 
 
+def _cells(text: str) -> int:
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def _fit_cells(text: str, width: int) -> str:
+    if _cells(text) > width:
+        out, used = [], 0
+        for ch in text:
+            w = 2 if unicodedata.east_asian_width(ch) in "WF" else 1
+            if used + w > width - 1:
+                break
+            out.append(ch)
+            used += w
+        text = "".join(out) + "…"
+    return text + " " * max(0, width - _cells(text))
+
+
 class LineLoader:
 
     def __init__(self) -> None:
@@ -753,6 +817,8 @@ class LineLoader:
         self.sub: str = ""
         self.cur: str = ""
         self.force_bar: bool = False
+        self.indeterminate: bool = False
+        self.show_size: bool = True
         self._rows: int = 1
 
     @staticmethod
@@ -760,7 +826,12 @@ class LineLoader:
         return max(40, shutil.get_terminal_size((80, 24)).columns)
 
     def _bar(self, fill: int, width: int) -> str:
-        """Return a coloured block bar of the given character width."""
+        if self.indeterminate:
+            seg = max(4, width // 6)
+            span = width - seg
+            pos = self.frame % (2 * span) if span > 0 else 0
+            pos = pos if pos <= span else 2 * span - pos
+            return f"\x1b[90m{'░' * pos}{GOLD}{'█' * seg}\x1b[90m{'░' * (width - seg - pos)}{ANSI_RESET}"
         done = round(fill * width)
         done = max(0, min(done, width))
         filled = "█" * done
@@ -784,8 +855,7 @@ class LineLoader:
         line_w = min(w, 100) - 5
         end = (tail[:-5] if tail.endswith(" done") else tail).rjust(10)
         name_w = max(8, line_w - len(prefix) - 5 - len(end))
-        nm = name if len(name) <= name_w else name[: name_w - 1] + "…"
-        label = f"{prefix}{nm.ljust(name_w)}.... {end}"
+        label = f"{prefix}{_fit_cells(name, name_w)}.... {end}"
         spin = SPIN_FRAMES[self.frame % len(SPIN_FRAMES)]
         self.frame += 1
 
@@ -794,27 +864,30 @@ class LineLoader:
             self.active = True
 
         show_bar = self.force_bar or self.pct > 0.0 or self.dl_mb > 0.0
-        rows = [f"  {GOLD}{spin}{ANSI_RESET} \x1b[37m{label.ljust(w - 5)}{ANSI_RESET}"]
+        rows = [f"  {GOLD}{spin}{ANSI_RESET} \x1b[37m{_fit_cells(label, w - 5)}{ANSI_RESET}"]
 
         if show_bar:
-            pct_str = f"{int(self.pct * 100)}%"
+            pct_str = "" if self.indeterminate else f"{int(self.pct * 100)}%"
             if self.total_mb > 0:
                 size_str = f"{self._size_str(self.dl_mb)} / {self._size_str(self.total_mb)}"
             else:
                 size_str = self._size_str(self.dl_mb)
-            right_part = f"  {pct_str.rjust(4)}  {size_str}"
+            right_part = f"  {pct_str.rjust(4)}" + (f"  {size_str}" if self.show_size else "")
             bar_avail = max(10, w - 4 - len(right_part) - 2)
             if self.sub:
                 sub = self.sub if len(self.sub) <= w - 8 else self.sub[: w - 9] + "…"
                 rows.append(f"    \x1b[90m↳ {ANSI_RESET}\x1b[37m{sub}{ANSI_RESET}")
             rows.append(f"    {self._bar(self.pct, bar_avail)}{ANSI_RESET}\x1b[90m{right_part}{ANSI_RESET}")
+        elif self.sub:
+            sub = self.sub if len(self.sub) <= w - 8 else self.sub[: w - 9] + "…"
+            rows.append(f"    \x1b[90m↳ {sub}{ANSI_RESET}")
 
         if self._rows > 1:
             sys.stdout.write(f"\x1b[{self._rows - 1}A")
         sys.stdout.write("\r")
         if len(rows) != self._rows:
             sys.stdout.write("\x1b[J")
-        sys.stdout.write("\n".join("\x1b[2K" + r for r in rows))
+        sys.stdout.write("\r\n".join("\x1b[2K" + r for r in rows))
         self._rows = len(rows)
         self._two_line = self._rows > 1
         sys.stdout.flush()
@@ -835,13 +908,24 @@ class LineLoader:
 
 
 import re as _re
-_NPM_HTTP_RE  = _re.compile(r"npm http fetch GET 200 .+?(\d+)ms \((\d+) bytes\)", _re.IGNORECASE)
-_NPM_STAGE_RE = _re.compile(r"npm timing (reify|resolve|fetch|link|audit)(?:Node)?:(\S+)", _re.IGNORECASE)
-_NPM_FETCH_RE = _re.compile(r"http fetch GET \d+ (\S+)", _re.IGNORECASE)
+_NPM_FETCH_RE = _re.compile(r"http (?:fetch GET \d+ |cache (?:\S+@)?)(https?://\S+)", _re.IGNORECASE)
+_NPM_RUN_RE = _re.compile(r"\binfo run (\S+@\S+) (\w+) (?!\{)")
 _NPM_TGZ_VER_RE = _re.compile(r"-(\d[\w.+-]*)\.tgz$")
 
 
-def _parse_npm_progress(line: str, loader: "LineLoader", fetched_bytes: list) -> None:
+class NpmProgress:
+    def __init__(self) -> None:
+        self.looked: set[str] = set()
+        self.got: set[str] = set()
+        self.cur = ""
+        self.script = ""
+
+
+def _parse_npm_progress(line: str, loader: "LineLoader", prog: "NpmProgress") -> None:
+    run = _NPM_RUN_RE.search(line)
+    if run:
+        prog.script = f"{run.group(1)} {run.group(2)}"
+        return
     m = _NPM_FETCH_RE.search(line)
     if not m:
         return
@@ -849,9 +933,43 @@ def _parse_npm_progress(line: str, loader: "LineLoader", fetched_bytes: list) ->
     if "/-/" in path:
         name, rest = path.split("/-/", 1)
         v = _NPM_TGZ_VER_RE.search(rest)
-        loader.cur = f"{name}@{v.group(1)}" if v else name
+        prog.got.add(path)
+        prog.cur = f"{name}@{v.group(1)}" if v else name
     elif path:
-        loader.cur = f"resolving {path}"
+        prog.looked.add(path)
+        prog.cur = path
+
+
+def _npm_expected_from_lock(cwd: str | None) -> int:
+    try:
+        lock = json.loads(Path(cwd or os.getcwd(), "package-lock.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    mach = platform.machine().lower()
+    cpu = {"amd64": "x64", "x86_64": "x64", "aarch64": "arm64", "arm64": "arm64", "i386": "ia32", "i686": "ia32", "x86": "ia32"}.get(
+        mach, "arm" if mach.startswith("arm") else mach)
+    libc = None
+    if sys.platform.startswith("linux"):
+        libc = "musl" if "musl" in (platform.libc_ver()[0] or "").lower() or Path("/etc/alpine-release").exists() else "glibc"
+
+    def fits(values: object, current: str | None) -> bool:
+        if not values or current is None:
+            return True
+        values = [str(v) for v in values] if isinstance(values, list) else [str(values)]
+        if "!" + current in values:
+            return False
+        wanted = [v for v in values if not v.startswith("!")]
+        return not wanted or current in wanted
+
+    count = 0
+    for key, entry in (lock.get("packages") or {}).items():
+        if not key or not isinstance(entry, dict) or entry.get("dev") or entry.get("link"):
+            continue
+        if Path(cwd or os.getcwd(), key, "package.json").is_file():
+            continue
+        if fits(entry.get("os"), sys.platform) and fits(entry.get("cpu"), cpu) and fits(entry.get("libc"), libc):
+            count += 1
+    return count
 
 
 def _scan_modules(root: str) -> tuple[int, float]:
@@ -871,65 +989,33 @@ def _scan_modules(root: str) -> tuple[int, float]:
     return count, size / 1_048_576
 
 
-def _npm_expected_packages(label: str, cmd: list[str], cwd: str | None, loader: "LineLoader") -> int:
-    box: dict = {}
-
-    def _dry() -> None:
-        try:
-            r = subprocess.run(
-                cmd + ["--dry-run", "--json"], cwd=cwd, capture_output=True,
-                text=True, encoding="utf-8", errors="replace", timeout=120,
-            )
-            box["out"] = r.stdout or ""
-        except Exception:
-            box["out"] = ""
-
-    th = threading.Thread(target=_dry, daemon=True)
-    th.start()
-    loader.force_bar = True
-    loader.sub = "resolving dependency tree"
-    while th.is_alive():
-        loader.update(label, "resolving", prefix="Installing ")
-        time.sleep(0.08)
-    out = box.get("out", "")
-    try:
-        data = json.loads(out[out.index("{"):])
-        added = data.get("added", 0)
-        return len(added) if isinstance(added, list) else int(added)
-    except Exception:
-        return 0
-
-
-def run_with_loader(label: str, cmd: list[str], *, cwd: str | None = None, timeout: float | None = None) -> subprocess.CompletedProcess:
-    """Run a subprocess while showing a spinner + live progress bar.
-
-    For npm install commands the bar shows N% and MB/MB downloaded in real time.
-    For other commands it falls back to a plain spinner.
-    """
+def run_with_loader(label: str, cmd: list[str], *, cwd: str | None = None, timeout: float | None = None,
+                    prefix: str = "Installing ", parser: Any = None, watch_file: str | None = None) -> subprocess.CompletedProcess:
     loader = LineLoader()
-    is_npm = any("npm" in str(c) for c in cmd)
-    fetched_bytes: list[int] = [0]
-    expected = 0
-    if is_npm and "install" in [str(c) for c in cmd] and "--dry-run" not in cmd:
-        try:
-            expected = _npm_expected_packages(label, [str(c) for c in cmd], cwd, loader)
-        finally:
-            loader.clear()
+    is_npm = bool(cmd) and os.path.basename(str(cmd[0])).lower().split(".")[0] == "npm"
+    prog = NpmProgress()
+    expected = _npm_expected_from_lock(cwd) if is_npm else 0
     if is_npm:
         loader.force_bar = True
+        loader.indeterminate = True
+        loader.sub = "resolving dependencies"
+    elif parser or watch_file:
+        loader.force_bar = True
+        loader.indeterminate = True
+        loader.show_size = False
 
     if is_npm:
         verbose_cmd = [str(c) for c in cmd]
         if "--loglevel" not in " ".join(verbose_cmd):
             verbose_cmd = [verbose_cmd[0]] + ["--loglevel=verbose"] + verbose_cmd[1:]
         proc = subprocess.Popen(
-            verbose_cmd, cwd=cwd,
+            verbose_cmd, cwd=cwd, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             encoding="utf-8", errors="replace",
         )
     else:
         proc = subprocess.Popen(
-            cmd, cwd=cwd,
+            cmd, cwd=cwd, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
             encoding="utf-8", errors="replace",
         )
@@ -939,11 +1025,25 @@ def run_with_loader(label: str, cmd: list[str], *, cwd: str | None = None, timeo
     stdout_lines: list[str] = []
     done_evt = threading.Event()
 
+    def _feed(raw: str) -> None:
+        text = _re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", raw).strip()
+        if not text or "stable CLI interface" in text:
+            return
+        if parser:
+            try:
+                parser(text, loader)
+            except Exception:
+                pass
+        else:
+            loader.sub = text
+
     def _drain(stream, store: list, parse: bool) -> None:
         for raw in stream:
             store.append(raw)
             if parse:
-                _parse_npm_progress(raw, loader, fetched_bytes)
+                _parse_npm_progress(raw, loader, prog)
+            elif not is_npm:
+                _feed(raw)
         done_evt.set()
 
     if is_npm:
@@ -959,34 +1059,65 @@ def run_with_loader(label: str, cmd: list[str], *, cwd: str | None = None, timeo
 
     def _monitor() -> None:
         nm = os.path.join(cwd or os.getcwd(), "node_modules")
-        base_pk, base_mb = _scan_modules(nm)
+        _, base_mb = _scan_modules(nm)
         while not stop_mon.is_set():
-            pk, mb = _scan_modules(nm)
-            done = max(0, pk - base_pk)
-            dl = max(0.0, mb - base_mb)
-            if expected > 0:
-                frac = min(done / expected, 0.99)
-                total = max(dl, dl / frac) if frac >= 0.1 else max(dl, 40.0)
-                loader.pct = frac
-                loader.total_mb = total
-                count = f"{min(done, expected)}/{expected} packages"
-            else:
-                total = max(dl + 5.0, 40.0)
-                loader.pct = min(dl / total, 0.95)
-                loader.total_mb = total
-                count = f"{done} packages"
-            loader.dl_mb = dl
-            loader.sub = f"{loader.cur}  ({count})" if loader.cur else count
+            _, mb = _scan_modules(nm)
+            loader.dl_mb = max(0.0, mb - base_mb)
+            loader.total_mb = 0.0
+            got, looked = len(prog.got), len(prog.looked)
+            total = expected or (max(looked, got) if got else 0)
+            if got and total:
+                loader.indeterminate = False
+                loader.pct = max(loader.pct, min(got / total, 0.99))
+                step = f"running {prog.script}" if prog.script else prog.cur
+                loader.sub = f"{step}  ({min(got, total)}/{total} packages)"
+            elif prog.script:
+                loader.indeterminate = True
+                loader.sub = f"running {prog.script}"
+            elif got:
+                loader.indeterminate = True
+                loader.sub = f"{prog.cur}  ({got} packages)"
+            elif looked:
+                loader.indeterminate = True
+                loader.sub = f"resolving dependencies  ({looked} looked up)"
             stop_mon.wait(0.35)
 
     if is_npm:
         threading.Thread(target=_monitor, daemon=True).start()
 
+    def _tail(path: str) -> None:
+        decoder = codecs.getincrementaldecoder("utf-8-sig")("replace")
+        pos, buf = 0, ""
+        while True:
+            last = stop_mon.is_set()
+            try:
+                with open(path, "rb") as fh:
+                    fh.seek(pos)
+                    chunk = fh.read()
+                pos += len(chunk)
+            except OSError:
+                chunk = b""
+            if chunk:
+                parts = re.split(r"[\r\n]+", buf + decoder.decode(chunk))
+                buf = parts.pop()
+                for part in parts:
+                    _feed(part)
+            if last:
+                if buf:
+                    _feed(buf)
+                return
+            stop_mon.wait(0.15)
+
+    tail_thread = None
+    if watch_file:
+        tail_thread = threading.Thread(target=_tail, args=(watch_file,), daemon=True)
+        tail_thread.start()
+
     start = time.time()
     timed_out = False
     try:
         while True:
-            loader.update(label, "installing", prefix="Installing ")
+            loader.update(label, prefix.strip().lower(), prefix=prefix)
             try:
                 proc.wait(timeout=0.08)
                 break
@@ -997,11 +1128,23 @@ def run_with_loader(label: str, cmd: list[str], *, cwd: str | None = None, timeo
                     timed_out = True
                     break
         stop_mon.set()
+        if tail_thread:
+            tail_thread.join(timeout=3)
         if is_npm and not timed_out:
+            loader.indeterminate = False
             loader.sub = "done"
             loader.pct = 1.0
-            loader.dl_mb = loader.total_mb if loader.total_mb > 0 else loader.dl_mb
-        loader.update(label, "timed out" if timed_out else "done", force=True, prefix="Installing ")
+        elif (parser or watch_file) and not timed_out and proc.returncode == 0:
+            loader.indeterminate = False
+            loader.pct = 1.0
+        loader.update(label, "timed out" if timed_out else "done", force=True, prefix=prefix)
+    except KeyboardInterrupt:
+        stop_mon.set()
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        raise
     finally:
         loader.clear()
 
@@ -1106,9 +1249,21 @@ _COOKIE_IN_PASTE = re.compile(
 )
 
 
+def read_pasted_line(prompt: str) -> str:
+    parts = [input(prompt)]
+    while parts[-1].rstrip().endswith(("\\", "^")):
+        try:
+            parts.append(input())
+        except EOFError:
+            break
+    return " ".join(p.rstrip().rstrip("\\^").strip() for p in parts)
+
+
 def extract_cookie_header(raw: str) -> str:
     raw = raw.strip()
     m = _COOKIE_IN_PASTE.search(raw)
+    if not m and raw.lower().startswith("curl "):
+        return ""
     val = (m.group(1) if m else raw).strip()
     if len(val) > 1 and val[0] == val[-1] and val[0] in "'\"":
         val = val[1:-1].strip()
@@ -1151,16 +1306,37 @@ class AccountSessionState:
         if STATE_STORAGE_PATH.exists():
             try:
                 raw_data = json.loads(STATE_STORAGE_PATH.read_text(encoding="utf-8"))
+                if not isinstance(raw_data, dict):
+                    raise ValueError("not a JSON object")
+            except ValueError as exc:
+                broken = STATE_STORAGE_PATH.with_name(f"{STATE_STORAGE_PATH.name}.broken-{int(time.time())}")
+                try:
+                    os.replace(STATE_STORAGE_PATH, broken)
+                    print(f"  session.json could not be read ({exc}), moved it to {broken.name} and started fresh.", file=sys.stderr)
+                except OSError:
+                    pass
+                return cls()
+            except OSError:
+                return cls()
+            try:
                 known_keys = set(cls().__dict__.keys())
                 instance = cls(**{k: v for k, v in raw_data.items() if k in known_keys and k != "used_games"})
                 instance.used_games = raw_data.get("used_games", [])
                 migrate = False
+                unreadable = set()
                 for key in SECRET_FIELDS:
                     stored = str(getattr(instance, key) or "")
                     migrate = migrate or bool(stored and not secret_store.is_protected(stored) and secret_store.available())
-                    setattr(instance, key, secret_store.reveal(key, stored))
+                    value = secret_store.reveal(key, stored)
+                    if not value and secret_store.is_protected(stored):
+                        unreadable.add(key)
+                    setattr(instance, key, value)
+                instance._unreadable = unreadable
                 if migrate:
-                    instance.persist()
+                    try:
+                        instance.persist()
+                    except OSError:
+                        pass
                 return instance
             except Exception:
                 pass
@@ -1175,20 +1351,31 @@ class AccountSessionState:
                 pass
         if not isinstance(existing, dict):
             existing = {}
+        unreadable = {key for key in getattr(self, "_unreadable", set()) if not getattr(self, key)}
+        kept = {key: existing[key] for key in unreadable if existing.get(key)}
+        self._unreadable = unreadable
         existing.update(asdict(self))
         for key in SECRET_FIELDS:
             existing[key] = secret_store.protect(key, str(existing.get(key) or ""))
-        if os.name == "nt":
-            secret_store.restrict_file(STATE_STORAGE_PATH)
-            STATE_STORAGE_PATH.write_text(json.dumps(existing, indent=2), encoding="utf-8")
-        else:
-            fd = os.open(STATE_STORAGE_PATH, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        existing.update(kept)
+        tmp = STATE_STORAGE_PATH.with_name(STATE_STORAGE_PATH.name + ".tmp")
+        try:
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
             with os.fdopen(fd, "w", encoding="utf-8") as fh:
-                os.fchmod(fh.fileno(), 0o600)
+                if os.name != "nt":
+                    os.fchmod(fh.fileno(), 0o600)
                 fh.write(json.dumps(existing, indent=2))
-
-    def save(self) -> None:
-        self.persist()
+                fh.flush()
+                os.fsync(fh.fileno())
+            if os.name == "nt":
+                secret_store.restrict_file(tmp, force=True)
+            os.replace(tmp, STATE_STORAGE_PATH)
+        except BaseException:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+            raise
 
     @property
     def requires_refresh(self) -> bool:
@@ -1226,6 +1413,8 @@ def assemble_super_properties(signature_id: str, session_id: str) -> tuple[str, 
         )
         with urllib.request.urlopen(network_req, timeout=10) as net_resp:
             properties_payload = json.loads(net_resp.read().decode("utf-8"))["properties"]
+        if not isinstance(properties_payload, dict):
+            raise ValueError("properties is not an object")
     except Exception:
         properties_payload = generate_fallback_properties()
 
@@ -1234,6 +1423,10 @@ def assemble_super_properties(signature_id: str, session_id: str) -> tuple[str, 
     properties_payload["client_heartbeat_session_id"] = session_id
     serialized = json.dumps(properties_payload, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(serialized).decode("ascii"), properties_payload
+
+
+class TokenRejected(RuntimeError):
+    pass
 
 
 def request_analytics_credential(auth_token: str, super_properties_b64: str) -> str:
@@ -1249,6 +1442,9 @@ def request_analytics_credential(auth_token: str, super_properties_b64: str) -> 
         with urllib.request.urlopen(network_req, timeout=15) as net_resp:
             parsed = json.loads(net_resp.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            raise TokenRejected("Discord rejected the account token (HTTP 401). It is incomplete or Discord reset it "
+                                "(logout, password change), a fresh token is needed.") from exc
         raise RuntimeError(f"Authentication rejected by endpoint (HTTP {exc.code})") from exc
 
     credential = parsed.get("analytics_token")
@@ -1642,13 +1838,29 @@ class TelemetryEventFabricator:
         }
 
         request_handle = urllib.request.Request(TELEMETRY_INGEST_URL, data=encoded_body, method="POST", headers=network_headers)
-        try:
-            with urllib.request.urlopen(request_handle, timeout=15) as response:
-                return response.status
-        except urllib.error.HTTPError as error:
-            return error.code
-        except Exception:
-            return 0
+        for attempt in range(3):
+            last = attempt == 2
+            try:
+                with urllib.request.urlopen(request_handle, timeout=15) as response:
+                    return response.status
+            except urllib.error.HTTPError as error:
+                if error.code == 429 and not last:
+                    try:
+                        wait = float(error.headers.get("Retry-After") or json.loads(error.read() or b"{}").get("retry_after") or 5)
+                    except (ValueError, AttributeError, TypeError):
+                        wait = 5.0
+                    time.sleep(min(max(wait, 1.0), 60.0))
+                    continue
+                if error.code >= 500 and not last:
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                return error.code
+            except Exception:
+                if not last:
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                return 0
+        return 0
 
 
 def segment_collection(items: Sequence[DetectableTitle], chunk_size: int) -> Iterator[Sequence[DetectableTitle]]:
@@ -1683,15 +1895,13 @@ class IngestionPipeline:
                 )
                 return processed_successfully
             else:
-                self.terminal.warning(f"batch {batch_index}", f"HTTP {http_status}")
+                reason = "network error" if http_status == 0 else f"HTTP {http_status}"
+                self.terminal.warning(f"batch {batch_index}", f"{reason}, batch skipped")
 
             time.sleep(NETWORK_COOLDOWN_SEC)
 
         return processed_successfully
 
-
-USER_AGENT = USER_AGENT_IDENTIFIER
-_user_id_from_token = extract_account_snowflake
 
 STREAM_TIERS = [
     (1, "Newcomer", 1),
@@ -1705,7 +1915,6 @@ STREAM_TIERS = [
     (9, "Visionary", 2000),
     (10, "Phenomenon", 5000),
 ]
-
 
 
 class Console:
@@ -1760,9 +1969,6 @@ class Console:
 
     def rule(self) -> None:
         print(f"  {self.GREY}{self.RULE}{self.RESET}")
-
-
-
 
 
 STAR_REPO = "ItzMeShadow999/BadgeMaxxer"
@@ -1987,7 +2193,7 @@ class ApplicationController:
         self.terminal.log("synchronizing analytics credentials...")
         self._renew_session()
         try:
-            synchronize_credentials(self.state, self.runtime_context.encoded_properties)
+            self._synchronize_or_ask_token()
         except Exception as exc:
             self.terminal.failure("auth", str(exc))
             self.terminal.warning("auth", f"Opening the menu anyway, use '{CREDENTIALS_MENU}' to fix your token or cookie.")
@@ -2020,11 +2226,22 @@ class ApplicationController:
             except Exception:
                 pass
             T.log("Open Discord (web or desktop), press Ctrl+Shift+I, open Console, paste, press Enter.")
+            T.log("A browser may refuse the paste until you type: allow pasting. On Linux the desktop app has no console, use the browser.")
             T.log("The snippet copies your token to the clipboard itself. Come back here and paste it below.")
         else:
             T.log("Paste your Discord account authorization token:")
-        val = input(f"  {T.COLOR_MUTED}token:{T.COLOR_RESET} ").strip().strip("\"'`")
+        val = ""
+        for _ in range(3):
+            raw = input(f"  {T.COLOR_MUTED}token:{T.COLOR_RESET} ")
+            if not raw.strip():
+                break
+            val, problem = clean_token(raw)
+            if val:
+                break
+            T.failure("token", problem)
         if val:
+            if val != self.state.token:
+                self.state.fetched_at = 0
             self.state.token = val
             self.state.persist()
             self.terminal.success("token", "Saved to local state")
@@ -2049,11 +2266,13 @@ class ApplicationController:
     def _prompt_clearance_cookie(self) -> None:
         print_cookie_help(self.terminal)
         self.terminal.log("Paste your cf_clearance cookie header value:")
-        val = extract_cookie_header(input(f"  {self.terminal.COLOR_MUTED}cookie:{self.terminal.COLOR_RESET} "))
+        val = extract_cookie_header(read_pasted_line(f"  {self.terminal.COLOR_MUTED}cookie:{self.terminal.COLOR_RESET} "))
         if val:
             self.state.cookie = val
             self.state.persist()
             self.terminal.success("cookie", "Saved to local state")
+        else:
+            self.terminal.failure("cookie", "No cookie found in the paste, nothing was saved.")
 
     def _reconfigure_credentials(self) -> None:
         T = self.terminal
@@ -2069,7 +2288,7 @@ class ApplicationController:
         T.log("Refreshing analytics token from Discord...")
         try:
             self.state.fetched_at = 0
-            synchronize_credentials(self.state, self.runtime_context.encoded_properties)
+            self._synchronize_or_ask_token()
         except Exception as exc:
             T.failure("auth", str(exc))
             self._pause()
@@ -2079,13 +2298,29 @@ class ApplicationController:
         T.success("auth", "Credentials refreshed successfully")
         time.sleep(1)
 
+    def _synchronize_or_ask_token(self) -> None:
+        for attempt in range(3):
+            try:
+                synchronize_credentials(self.state, self.runtime_context.encoded_properties)
+                return
+            except TokenRejected as exc:
+                if attempt == 2:
+                    raise
+                self.terminal.failure("auth", str(exc))
+                if arrow_menu("Token rejected", ["Enter a new token now", "Skip"]) != 0:
+                    raise TokenRejected("The account token was not changed.") from exc
+                old = self.state.token
+                self._prompt_account_token()
+                if self.state.token == old:
+                    raise TokenRejected("The account token was not changed.") from exc
+
     def _ensure_runtime_readiness(self) -> bool:
         if not self.state.cookie:
             self.terminal.failure("cookie", f"Missing cookie. Use '{CREDENTIALS_MENU}' in the menu to configure.")
             return False
         if self.state.requires_refresh:
             try:
-                synchronize_credentials(self.state, self.runtime_context.encoded_properties)
+                self._synchronize_or_ask_token()
             except Exception as exc:
                 self.terminal.failure("auth", str(exc))
                 return False
@@ -2181,7 +2416,8 @@ class ApplicationController:
         )
 
         picked = {title.title_id for title in selected_titles}
-        self.state.used_games = [gid for gid in self.state.used_games if gid not in picked or gid in engine.accepted_ids]
+        accepted_ids = set(engine.accepted_ids)
+        self.state.used_games = [gid for gid in self.state.used_games if gid not in picked or gid in accepted_ids]
 
         print()
         T.success("completed", f"{accepted}/{len(selected_titles)} titles processed ({accepted * hours:,.1f}h total)")
@@ -2196,6 +2432,7 @@ class ApplicationController:
         T = self.terminal
         T.warning("game time", "Game Time progress will most likely not increase.")
         T.warning("game time", "Discord has patched this server side, so scripts that claim to boost it no longer count.")
+        T.warning("game time", "It still runs, in case Discord starts counting it again.")
         print()
 
     def trigger_playtime_ingestion(self, default_games: int | None = None, default_hours: float = 1.0, label: str = "Game Time") -> None:
@@ -2269,12 +2506,18 @@ class ApplicationController:
         T.log("Level up all: press enter to accept each default")
         print()
         self._warn_game_time()
-        time_params = self._ask_claim_params("Game Time", TIME_DEFAULT_GAMES, TIME_DEFAULT_HOURS)
-        if time_params == BACK_TO_MENU:
+        pick = arrow_menu("Game Time is patched, include it anyway?",
+                          ["Skip Game Time", "Include Game Time", "Back to Main menu"])
+        if pick is None or pick == 2:
             return
-        if not time_params:
-            self._pause()
-            return
+        time_params = None
+        if pick == 1:
+            time_params = self._ask_claim_params("Game Time", TIME_DEFAULT_GAMES, TIME_DEFAULT_HOURS)
+            if time_params == BACK_TO_MENU:
+                return
+            if not time_params:
+                self._pause()
+                return
         print()
         variety_params = self._ask_claim_params("Game Variety", None, VARIETY_DEFAULT_HOURS)
         if variety_params == BACK_TO_MENU:
@@ -2294,13 +2537,14 @@ class ApplicationController:
             return
 
         print()
-        T.separator()
-        T.log(f"{T.COLOR_PRIMARY}Game Time{T.COLOR_RESET}")
-        if not self._star_gate(quiet=True):
-            T.failure("star", "Star/follow check failed before Game Time, stopping.")
-            self._pause("exit")
-            return
-        self._run_claim(*time_params)
+        if time_params:
+            T.separator()
+            T.log(f"{T.COLOR_PRIMARY}Game Time{T.COLOR_RESET}")
+            if not self._star_gate(quiet=True):
+                T.failure("star", "Star/follow check failed before Game Time, stopping.")
+                self._pause("exit")
+                return
+            self._run_claim(*time_params)
         T.separator()
         T.log(f"{T.COLOR_PRIMARY}Game Variety{T.COLOR_RESET}")
         if not self._star_gate(quiet=True):
@@ -2321,7 +2565,8 @@ class ApplicationController:
 
     def _filter_title_selection(self, desired_amount: int) -> list[DetectableTitle]:
         existing_pool = {item.title_id for item in self.catalog}
-        unprocessed = [item.title_id for item in self.catalog if item.title_id not in self.state.used_games]
+        used = set(self.state.used_games)
+        unprocessed = [item.title_id for item in self.catalog if item.title_id not in used]
         processed = [gid for gid in self.state.used_games if gid in existing_pool]
 
         if len(unprocessed) >= desired_amount:
@@ -2332,7 +2577,8 @@ class ApplicationController:
                 needed = desired_amount - len(chosen)
                 chosen.extend(processed[:needed])
 
-        self.state.used_games = [gid for gid in self.state.used_games if gid not in chosen] + chosen
+        chosen_set = set(chosen)
+        self.state.used_games = [gid for gid in self.state.used_games if gid not in chosen_set] + chosen
         registry = {item.title_id: item for item in self.catalog}
         return [registry[gid] for gid in chosen if gid in registry]
 
@@ -2416,6 +2662,7 @@ class ApplicationController:
                 "authorization": self.state.token,
                 "user-agent": USER_AGENT_IDENTIFIER,
                 "x-super-properties": encoded_props,
+                "x-discord-locale": CLIENT_LOCALE,
             },
         )
         try:
@@ -2438,14 +2685,53 @@ class ApplicationController:
                     T.log(f"  {T.COLOR_PRIMARY}•{T.COLOR_RESET} {T.COLOR_TEXT}{bid}{T.COLOR_RESET}: {desc}")
             else:
                 T.log("No public badges equipped on profile.")
+            self._show_badge_progress(encoded_props)
         except Exception as exc:
             T.failure("profile", f"Failed to retrieve profile: {exc}")
 
         T.separator()
         input(f"  {T.COLOR_PRIMARY}›{T.COLOR_RESET} Press enter to continue")
 
+    def _show_badge_progress(self, encoded_props: str) -> None:
+        T = self.terminal
+        request = urllib.request.Request(
+            f"{DISCORD_USERS_API}/@me/badges",
+            headers={
+                "authorization": self.state.token,
+                "user-agent": USER_AGENT_IDENTIFIER,
+                "x-super-properties": encoded_props,
+                "x-discord-locale": CLIENT_LOCALE,
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=15) as resp:
+                badges = json.loads(resp.read().decode("utf-8")).get("badges") or []
+        except urllib.error.HTTPError as exc:
+            T.log(f"{T.COLOR_MUTED}Badge progress is not available (HTTP {exc.code}).{T.COLOR_RESET}")
+            return
+        except Exception as exc:
+            T.log(f"{T.COLOR_MUTED}Badge progress is not available ({exc}).{T.COLOR_RESET}")
+            return
+        by_id = {b.get("badge_id"): b for b in badges if isinstance(b, dict)}
+        rows = [by_id[i] for i in LEVEL_BADGE_IDS if i in by_id]
+        if not rows:
+            return
+        T.log("Badge progress:")
+        for badge in rows:
+            tiers = {t.get("key"): t for t in badge.get("tiers") or [] if isinstance(t, dict)}
+            current = (tiers.get(badge.get("current_tier")) or {}).get("name") or "none"
+            line = f"{badge.get('name')}: {badge.get('info_label') or '-'} · tier {current}"
+            upcoming = tiers.get(badge.get("next_tier"))
+            if upcoming:
+                need = (upcoming.get("requirements") or [{}])[0]
+                line += f" · next {upcoming.get('name')} at {need.get('threshold')} {need.get('unit', '')}".rstrip()
+            elif badge.get("current_tier"):
+                line += " · highest tier"
+            if badge.get("hidden"):
+                line += " · hidden on profile"
+            T.log(f"  {T.COLOR_PRIMARY}•{T.COLOR_RESET} {line}")
+
     def _streamer_gate(self) -> str | None:
-        """Returns 'headless' to run Streamer/Streamer.js directly."""
         return "headless"
 
     def run_gateway_live_streamer(self, hours: float = 0.0, mode: str | None = None) -> None:
@@ -2454,58 +2740,94 @@ class ApplicationController:
             return
         C = self.stream_console
         proc = self._open_streamer()
-        if proc is None:
+        if proc is not None:
+            if hours > 0:
+                C.info(f"When the streamer asks for the duration, enter {hours * 60:.0f} minutes ({hours:,.1f}h).")
+            else:
+                C.info("When the streamer asks for the duration, enter 0 to stream until you stop it.")
+            C.info("The stream and its hour totals are handled in the streamer window.")
+            C.info("Once it is live, use 'Start Watcher' in the main menu so the alt watches it.")
+        self._pause()
+
+    def _ensure_system_deps(self) -> None:
+        C = self.stream_console
+        if auto_install is None:
+            C.warn("streamer", "lib/auto_install.py is missing, re-run the installer to get all files.")
             return
-        if hours > 0:
-            C.info(f"When the streamer asks for the duration, enter {hours * 60:,.0f} minutes ({hours:,.1f}h).")
+        auto_install.refresh_path()
+        need = auto_install.missing(STREAMER_NODE_MIN)
+        if not need:
+            return
+        C.warn("streamer", f"missing on this system: {', '.join(need)}. Installing them needs administrator/root rights.")
+        if arrow_menu("Install now?", ["Yes, install automatically", "No, I will install them myself"]) != 0:
+            return
+        def log(level: str, msg: str) -> None:
+            if level == "info":
+                C.info(msg)
+            else:
+                {"ok": C.ok, "warn": C.warn, "err": C.err}[level]("install", msg)
+        auto_install.install(need, log, runner=run_with_loader)
+        left = auto_install.missing(STREAMER_NODE_MIN)
+        if left:
+            C.err("install", f"still missing: {', '.join(left)}. You may need to restart this terminal, or install manually:")
+            for line in auto_install.manual_help(left):
+                C.info(line)
         else:
-            C.info("When the streamer asks for the duration, enter 0 to stream until you stop it.")
-        C.info("The stream and its hour totals are handled in the streamer window.")
-        C.info("Once it is live, use 'Start Watcher' in the main menu so the alt watches it.")
+            C.ok("install", f"installed {', '.join(need)}")
 
     def _streamer_preflight(self) -> str | None:
-        """Streamer.js, Node.js and its npm packages. Installs missing packages. Prints why and returns
-        None when it cannot start, else the node executable."""
         C = self.stream_console
         if not STREAMER_SCRIPT.is_file():
             C.warn("streamer", f"missing: {STREAMER_SCRIPT} (put Streamer.js in the Streamer folder next to BadgeMaxxer.py)")
             return None
+        self._ensure_system_deps()
         node = shutil.which("node")
         if not node:
-            C.err("streamer", "Node.js was not found on PATH, install Node.js 18 or newer from https://nodejs.org and run BadgeMaxxer again")
+            C.err("streamer", f"Node.js was not found on PATH, install Node.js {STREAMER_NODE_MIN[0]}.{STREAMER_NODE_MIN[1]} or newer from https://nodejs.org and run BadgeMaxxer again")
             return None
+        out = ""
         try:
             out = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=15).stdout.strip()
-            major = int(out.lstrip("v").split(".")[0])
+            version = tuple(int(part) for part in out.lstrip("v").split(".")[:2])
         except Exception:
-            major = 0
-        if 0 < major < 18:
-            C.err("streamer", f"Node.js {out} is too old, the streamer needs Node.js 18 or newer")
+            version = ()
+        if version and version < STREAMER_NODE_MIN:
+            C.err("streamer", f"Node.js {out} is too old, the streamer needs Node.js {STREAMER_NODE_MIN[0]}.{STREAMER_NODE_MIN[1]} or newer")
             return None
-        missing = [p for p in STREAMER_PACKAGES if not (STREAMER_DIR / "node_modules" / p).is_dir()]
+        missing = [p for p in STREAMER_PACKAGES if not (STREAMER_DIR / "node_modules" / p / "package.json").is_file()]
         if missing:
             npm = shutil.which("npm")
+            specs = [f"{p}@{STREAMER_PINS[p]}" for p in missing]
             if not npm:
-                C.err("streamer", f"npm was not found, run in {STREAMER_DIR}: npm install {' '.join(missing)}")
+                C.err("streamer", f"npm was not found, run in {STREAMER_DIR}: npm install {' '.join(specs)}")
                 return None
+            if not (STREAMER_DIR / "package-lock.json").is_file():
+                lock_cmd = [npm, "install", "--package-lock-only", "--ignore-scripts", "--prefix", str(STREAMER_DIR),
+                            "--no-audit", "--no-fund"]
+                if not (STREAMER_DIR / "package.json").is_file():
+                    lock_cmd += specs
+                try:
+                    run_with_loader("dependency list", lock_cmd, cwd=str(STREAMER_DIR), timeout=300, prefix="Resolving ")
+                except Exception:
+                    pass
+            cmd = [npm, "install", "--prefix", str(STREAMER_DIR), "--no-audit", "--no-fund"]
+            if not (STREAMER_DIR / "package.json").is_file():
+                cmd += specs
             try:
-                result = run_with_loader(
-                    ", ".join(missing),
-                    [npm, "install", "--no-audit", "--no-fund", *missing],
-                    cwd=str(STREAMER_DIR), timeout=900,
-                )
+                result = run_with_loader(", ".join(missing), cmd, cwd=str(STREAMER_DIR), timeout=900)
             except Exception as exc:
                 C.err("streamer", f"npm install failed: {exc}")
                 return None
             if result.returncode != 0:
                 tail = (result.stdout or "").strip().splitlines()[-3:]
-                C.err("streamer", f"npm install failed, run in {STREAMER_DIR}: npm install {' '.join(missing)}")
+                C.err("streamer", f"npm install failed, run in {STREAMER_DIR}: npm install {' '.join(specs)}")
                 for line in tail:
                     C.info(line)
                 return None
             C.ok("streamer", f"installed {', '.join(missing)}")
         if not shutil.which("ffmpeg"):
-            C.warn("streamer", "ffmpeg was not found on PATH, the streamer needs it to make the video feed")
+            C.err("streamer", "ffmpeg was not found on PATH, the streamer needs it to make the video feed. Install it from https://ffmpeg.org/download.html and run BadgeMaxxer again")
+            return None
         return node
 
     def _open_streamer(self):
@@ -2514,12 +2836,15 @@ class ApplicationController:
         if not node:
             return None
         cmd = [node, str(STREAMER_SCRIPT)]
+        account = extract_account_snowflake(self.state.token)
+        if account.isdigit():
+            cmd += ["--expect", account]
         if os.name == "nt":
             proc = subprocess.Popen(cmd, cwd=str(STREAMER_DIR), creationflags=subprocess.CREATE_NEW_CONSOLE)
         else:
             terminal = find_terminal_posix()
             if not terminal:
-                C.warn("streamer", f"run it in another terminal: cd \"{STREAMER_DIR}\" && node Streamer.js")
+                C.warn("streamer", f"run it in another terminal: cd \"{STREAMER_DIR}\" && node Streamer.js {' '.join(cmd[2:])}".rstrip())
                 return None
             launcher = ["sh", "-c", 'cd "$0" && exec "$@"', str(STREAMER_DIR)]
             window = subprocess.Popen(terminal + launcher + cmd, cwd=str(STREAMER_DIR), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -2528,17 +2853,13 @@ class ApplicationController:
         return proc
 
     def _streamer_totals(self) -> tuple[float, int]:
-        """Stream hours and sessions as logged by Streamer.js in Streamer/streamer_stats.json."""
         try:
             data = json.loads(STREAMER_STATS.read_text(encoding="utf-8"))
             return float(data.get("totalHours") or 0.0), int(data.get("sessions") or 0)
         except Exception:
             return self.state.total_stream_hours_claimed, self.state.total_stream_sessions
 
-
     def _watcher_preflight(self):
-        """Files, account id, a terminal (POSIX) and packages the Watcher needs, installing what is missing.
-        Prints why and returns None when it cannot start, else (account id, terminal command)."""
         C = self.stream_console
         absent = [name for name in WATCHER_FILES if not (WATCHER_DIR / name).is_file()]
         if absent:
@@ -2593,14 +2914,29 @@ class ApplicationController:
         self._open_watcher()
         self._pause()
 
+    def open_hypesquad_picker(self) -> None:
+        T = self.terminal
+        if not HYPESQUAD_SCRIPT.is_file():
+            T.failure("hypesquad", f"missing: {HYPESQUAD_SCRIPT}")
+            self._pause()
+            return
+        try:
+            code = subprocess.run([sys.executable, str(HYPESQUAD_SCRIPT)], cwd=str(HYPESQUAD_DIR)).returncode
+        except KeyboardInterrupt:
+            return
+        if code != 0:
+            T.failure("hypesquad", f"picker exited with code {code}")
+            self._pause()
+
     def render_main_menu(self) -> None:
         T = self.terminal
         options = [
             "Level up all",
-            "Game Time",
+            GAME_TIME_MENU,
             "Game Variety",
             "Streaming",
             "Start Watcher",
+            HYPESQUAD_MENU,
             "Inspect Discord Profile & Badges",
             CREDENTIALS_MENU,
             "Configure Executable Fingerprint",
@@ -2616,7 +2952,7 @@ class ApplicationController:
 
             choice = arrow_menu("Select what badge to level", options)
             print()
-            if choice is None or choice == 8:
+            if choice is None or choice == 9:
                 break
             if choice == 0:
                 self.level_up_all()
@@ -2629,10 +2965,12 @@ class ApplicationController:
             elif choice == 4:
                 self.start_watcher()
             elif choice == 5:
-                self.inspect_profile()
+                self.open_hypesquad_picker()
             elif choice == 6:
-                self._reconfigure_credentials()
+                self.inspect_profile()
             elif choice == 7:
+                self._reconfigure_credentials()
+            elif choice == 8:
                 self.configure_executable_fingerprint()
 
 

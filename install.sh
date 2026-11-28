@@ -6,8 +6,8 @@ REPO="badgemaxxer"
 TAG="${BADGEMAXXER_TAG:-}"
 RELEASES="https://github.com/$OWNER/$REPO/releases"
 DIR="$HOME/BadgeMaxxer"
-FILES="BadgeMaxxer.py lib/secret_store.py Watcher/stream_watcher.py Watcher/watcher_voice.py Watcher/watcher_common.py Streamer/Streamer.js"
-PACKAGES="websockets davey cryptography"
+FILES="BadgeMaxxer.py lib/secret_store.py Watcher/stream_watcher.py Watcher/watcher_voice.py Watcher/watcher_common.py Streamer/Streamer.js Streamer/package.json"
+PACKAGES="websockets davey"
 
 if [ -t 1 ]; then
     YELLOW="$(printf '\033[33m')"; GREEN="$(printf '\033[32m')"; RED="$(printf '\033[31m')"; RESET="$(printf '\033[0m')"
@@ -43,6 +43,10 @@ find_python() {
         fi
     done
     return 1
+}
+
+drop_downloads() {
+    for leftover in $FILES; do rm -f "$DIR/$leftover.download"; done
 }
 
 resolve_tag() {
@@ -94,8 +98,8 @@ ensure_system_packages() {
         node_major="$(node --version 2>/dev/null | sed 's/^v//; s/\..*//')"
         case "$node_major" in
             ""|*[!0-9]*) ;;
-            *) if [ "$node_major" -lt 18 ]; then
-                   bad "Node.js $(node --version) is too old, the Streamer needs Node.js 18 or newer (use NodeSource or nvm)"
+            *) if [ "$node_major" -lt 22 ]; then
+                   bad "Node.js $(node --version) is too old, the Streamer needs Node.js 22.18 or newer (use NodeSource or nvm)"
                fi ;;
         esac
     fi
@@ -144,7 +148,7 @@ install_badgemaxxer() {
         step "Fetching $file ...."
         mkdir -p "$(dirname "$target")"
         if ! fetch "$base/$file" "$temp"; then
-            rm -f "$temp"
+            drop_downloads
             bad "Could not install $file : download failed"
             return 1
         fi
@@ -159,17 +163,19 @@ install_badgemaxxer() {
         done < "$sums"
         actual="$(sha256 "$temp")"
         if [ -z "$expected" ]; then
-            rm -f "$temp"
+            drop_downloads
             bad "Could not install $file : no checksum listed for $file in SHA256SUMS"
             return 1
         fi
         if [ "$actual" != "$expected" ]; then
-            rm -f "$temp"
+            drop_downloads
             bad "Could not install $file : checksum mismatch (expected $expected, got $actual)"
             return 1
         fi
         ok "Verified $file (sha256 $(printf '%.16s' "$actual")...)"
-        mv -f "$temp" "$target"
+    done
+    for file in $FILES; do
+        mv -f "$DIR/$file.download" "$DIR/$file"
     done
     rm -f "$sums"
     ok "Files saved to $DIR (your session.json is never touched)"
